@@ -1,5 +1,5 @@
 import { Project, StoryCategory, AuditEvent, ProjectStats, FactualClaim, ScriptData } from '../types';
-import { getIdToken } from './firebase';
+import { getIdToken, isDevTokenAllowed } from './firebase';
 
 export interface SystemStatus {
   geminiConfigured: boolean;
@@ -57,7 +57,12 @@ export const api = {
     const headers = await authHeaders();
     const res = await fetch('/api/system/status', { headers });
     if (!res.ok) {
-      if (res.status === 401) throw new Error('UNAUTHORIZED: Authentication required.');
+      if (res.status === 401) {
+        if (isDevTokenAllowed()) {
+          localStorage.removeItem('ai_studio_auth_token');
+        }
+        throw new Error('UNAUTHORIZED: Authentication required.');
+      }
       throw new Error('Failed to fetch system status');
     }
     return res.json();
@@ -74,7 +79,12 @@ export const api = {
     const headers = await authHeaders();
     const res = await fetch('/api/projects', { headers });
     if (!res.ok) {
-      if (res.status === 401) throw new Error('UNAUTHORIZED: Please sign in or set valid credentials.');
+      if (res.status === 401) {
+        if (isDevTokenAllowed()) {
+          localStorage.removeItem('ai_studio_auth_token');
+        }
+        throw new Error('UNAUTHORIZED: Please sign in or set valid credentials.');
+      }
       throw new Error('Failed to fetch projects');
     }
     return res.json();

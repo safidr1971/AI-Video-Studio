@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import http from 'http';
-import { app } from '../server.ts';
+import express from 'express';
+import { app, configureTrustProxy } from '../server.ts';
 import { firestoreDb, resetMockFirestore } from './firestoreDb.ts';
 import { computeScriptHash, recalculateEvidenceStage } from './workflow.ts';
-import { verifyToken, isDevTokenAllowed } from './firebaseAdmin.ts';
+import { verifyToken, isDevTokenAllowed, assertProductionConfigSafe } from './firebaseAdmin.ts';
 import { coerceFactualClaims, generateTemplateFallback } from './gemini.ts';
 import { cleanupExpiredRateLimits, getRateLimitStoreSize, resetRateLimitStore } from './middleware/security.ts';
 import { VerificationStatus } from '../src/types';
@@ -538,6 +539,27 @@ describe('Local Development Authentication Policy', () => {
     expect(verified.uid).toBe('engineer1');
     expect(verified.role).toBe('creator');
   });
+
+  it('fails production startup check when ALLOW_DEV_TOKEN=true in production', () => {
+    process.env.NODE_ENV = 'production';
+    process.env.ALLOW_DEV_TOKEN = 'true';
+
+    expect(() => assertProductionConfigSafe()).toThrow(
+      'FATAL SECURITY CONFIGURATION: ALLOW_DEV_TOKEN=true is strictly prohibited in production mode.'
+    );
+  });
+
+  it('passes production startup check when ALLOW_DEV_TOKEN is not enabled in production', () => {
+    process.env.NODE_ENV = 'production';
+    delete process.env.ALLOW_DEV_TOKEN;
+
+    expect(() => assertProductionConfigSafe()).not.toThrow();
+  });
+
+  it('rejects empty or non-string tokens immediately', async () => {
+    await expect(verifyToken('')).rejects.toThrow('Token is missing or not a string');
+    await expect(verifyToken(null as any)).rejects.toThrow('Token is missing or not a string');
+  });
 });
 
 describe('Server-Side Gemini Claim Coercion', () => {
@@ -595,5 +617,46 @@ describe('Rate Limiter Bounded Memory Cleanup', () => {
   it('limits memory store size and prevents indefinite memory growth', () => {
     // Verify store size method works
     expect(getRateLimitStoreSize()).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe('Express Reverse Proxy & Trust Configuration', () => {
+  it('correctly sets boolean false when TRUST_PROXY is string "false" without throwing TypeError', () => {
+    const testApp = express();
+    expect(() => configureTrustProxy(testApp, 'false')).not.toThrow();
+    expect(testApp.get('trust proxy')).toBe(false);
+  });
+
+  it('correctly sets boolean false when TRUST_PROXY is uppercase "FALSE" or whitespace', () => {
+    const testApp = express();
+    expect(() => configureTrustProxy(testApp, '  FALSE  ')).not.toThrow();
+    expect(testApp.get('trust proxy')).toBe(false);
+  });
+
+  it('defaults to boolean false when TRUST_PROXY is undefined or empty', () => {
+    const testApp = express();
+    expect(() => configureTrustProxy(testApp, undefined)).not.toThrow();
+    expect(testApp.get('trust proxy')).toBe(false);
+
+    expect(() => configureTrustProxy(testApp, '')).not.toThrow();
+    expect(testApp.get('trust proxy')).toBe(false);
+  });
+
+  it('sets 1 hop when TRUST_PROXY is "true"', () => {
+    const testApp = express();
+    expect(() => configureTrustProxy(testApp, 'true')).not.toThrow();
+    expect(testApp.get('trust proxy')).toBe(1);
+  });
+
+  it('sets numeric hop count when TRUST_PROXY is a number string', () => {
+    const testApp = express();
+    expect(() => configureTrustProxy(testApp, '2')).not.toThrow();
+    expect(testApp.get('trust proxy')).toBe(2);
+  });
+
+  it('supports CIDR/IP notation strings safely', () => {
+    const testApp = express();
+    expect(() => configureTrustProxy(testApp, 'loopback')).not.toThrow();
+    expect(testApp.get('trust proxy')).toBeDefined();
   });
 });

@@ -12,9 +12,12 @@ import {
 import { generateIdeasAndScript, isGeminiConfigured } from './server/gemini.ts';
 import { requireAuth } from './server/middleware/auth.ts';
 import { createRateLimiter, securityHeadersMiddleware } from './server/middleware/security.ts';
-import { isFirebaseAdminConfigured } from './server/firebaseAdmin.ts';
+import { isFirebaseAdminConfigured, assertProductionConfigSafe } from './server/firebaseAdmin.ts';
 
 dotenv.config();
+
+// Enforce production safety check: forbid ALLOW_DEV_TOKEN=true in production
+assertProductionConfigSafe();
 
 export const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -22,19 +25,22 @@ const PORT = Number(process.env.PORT) || 3000;
 // Reverse Proxy & IP Resolution Safety:
 // Blindly trusting arbitrary proxy headers (e.g. app.set('trust proxy', true)) is vulnerable to IP spoofing.
 // Instead, trust proxy is controlled explicitly via TRUST_PROXY env var.
-// When unconfigured, it defaults to false (only trusting the direct TCP socket remote address).
-const trustProxyEnv = process.env.TRUST_PROXY;
-if (trustProxyEnv) {
-  if (trustProxyEnv === 'true') {
-    app.set('trust proxy', 1); // Trust 1 hop (e.g. Google Cloud Run front-end)
+// When unconfigured or explicitly set to 'false', it safely sets boolean false (only trusting direct TCP socket remote address).
+// Never pass string 'false' into Express app.set('trust proxy') as proxyaddr treats strings as IP/CIDR masks and throws TypeError.
+export function configureTrustProxy(appInstance: express.Application, rawTrustProxyEnv?: string): void {
+  const trustProxyEnv = rawTrustProxyEnv?.trim();
+  if (!trustProxyEnv || trustProxyEnv.toLowerCase() === 'false') {
+    appInstance.set('trust proxy', false);
+  } else if (trustProxyEnv.toLowerCase() === 'true') {
+    appInstance.set('trust proxy', 1); // Trust 1 hop (e.g. Google Cloud Run front-end)
   } else if (!isNaN(Number(trustProxyEnv))) {
-    app.set('trust proxy', Number(trustProxyEnv));
+    appInstance.set('trust proxy', Number(trustProxyEnv));
   } else {
-    app.set('trust proxy', trustProxyEnv);
+    appInstance.set('trust proxy', trustProxyEnv);
   }
-} else {
-  app.set('trust proxy', false);
 }
+
+configureTrustProxy(app, process.env.TRUST_PROXY);
 
 // Security Headers & Payload Limits
 app.use(securityHeadersMiddleware);

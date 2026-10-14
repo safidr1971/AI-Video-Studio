@@ -11,6 +11,11 @@ export default defineConfig(() => {
         '@': path.resolve(import.meta.dirname || process.cwd(), '.'),
       },
     },
+    define: {
+      'import.meta.env.VITE_ALLOW_DEV_TOKEN': JSON.stringify(
+        process.env.VITE_ALLOW_DEV_TOKEN || process.env.ALLOW_DEV_TOKEN || 'false'
+      ),
+    },
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modify—file watching is disabled to prevent flickering during agent edits.

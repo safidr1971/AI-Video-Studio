@@ -66,7 +66,8 @@ export function isDevTokenAllowed(): boolean {
   if (import.meta.env.PROD || import.meta.env.MODE === 'production') {
     return false;
   }
-  return import.meta.env.VITE_ALLOW_DEV_TOKEN === 'true';
+  const flag = String(import.meta.env.VITE_ALLOW_DEV_TOKEN || '').trim().toLowerCase();
+  return flag === 'true' || flag === '1';
 }
 
 export async function getIdToken(): Promise<string> {

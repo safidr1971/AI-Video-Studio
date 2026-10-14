@@ -59,8 +59,27 @@ function initializeAdmin() {
 
 initializeAdmin();
 
+export function hasRealFirestoreCredentials(): boolean {
+  if (process.env.GOOGLE_APPLICATION_CREDENTIALS && fs.existsSync(process.env.GOOGLE_APPLICATION_CREDENTIALS)) {
+    return true;
+  }
+  const configPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
+  if (fs.existsSync(configPath)) {
+    try {
+      const raw = fs.readFileSync(configPath, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (parsed.projectId && parsed.projectId !== 'remixed-project-id') {
+        return true;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return false;
+}
+
 export function isFirebaseAdminConfigured(): boolean {
-  return isInitialized;
+  return hasRealFirestoreCredentials();
 }
 
 export function getAdminAuth(): Auth {
@@ -91,6 +110,12 @@ export function isDevTokenAllowed(): boolean {
   }
   // Allow only when explicitly enabled via env var or in unit tests
   return process.env.ALLOW_DEV_TOKEN === 'true' || process.env.NODE_ENV === 'test';
+}
+
+export function assertProductionConfigSafe(): void {
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_DEV_TOKEN === 'true') {
+    throw new Error('FATAL SECURITY CONFIGURATION: ALLOW_DEV_TOKEN=true is strictly prohibited in production mode.');
+  }
 }
 
 export async function verifyToken(token: string): Promise<VerifiedUser> {

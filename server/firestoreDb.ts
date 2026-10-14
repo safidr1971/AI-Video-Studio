@@ -1,4 +1,4 @@
-import { getAdminFirestore, isFirebaseAdminConfigured } from './firebaseAdmin.ts';
+import { getAdminFirestore, isFirebaseAdminConfigured, hasRealFirestoreCredentials } from './firebaseAdmin.ts';
 import type { Query, QueryDocumentSnapshot } from 'firebase-admin/firestore';
 import { Project, StoryCategory, AuditEvent, ProjectStats, FactualClaim, ScriptData, ProjectStatus } from '../src/types';
 import { computeScriptHash, sanitizeProjectUpdate, validateStatusTransition, recalculateEvidenceStage } from './workflow.ts';
@@ -124,7 +124,14 @@ class MockFirestoreStore {
 const mockStore = new MockFirestoreStore();
 
 export function isUsingMockFirestore(): boolean {
-  return process.env.NODE_ENV === 'test' || process.env.USE_FIRESTORE_MOCK === 'true';
+  if (process.env.NODE_ENV === 'test' || process.env.USE_FIRESTORE_MOCK === 'true') {
+    return true;
+  }
+  // In development environments without live Google Cloud / Firebase credentials, transparently use mock store
+  if (process.env.NODE_ENV !== 'production' && !hasRealFirestoreCredentials()) {
+    return true;
+  }
+  return false;
 }
 
 export function resetMockFirestore(): void {
