@@ -1,0 +1,130 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "Registered user profile and workspace configuration.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "email": { "type": "string", "description": "User email address" },
+        "displayName": { "type": "string", "description": "User display name" },
+        "role": { "type": "string", "enum": ["creator", "editor", "admin"], "description": "User permission role" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "createdAt"]
+    },
+    "Project": {
+      "title": "Video Project",
+      "description": "Video production project with metadata, workflow state, and settings.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique project identifier" },
+        "ownerId": { "type": "string", "description": "UID of the creator" },
+        "title": { "type": "string", "maxLength": 200, "description": "Project title" },
+        "description": { "type": "string", "maxLength": 2000, "description": "Topic or synopsis" },
+        "category": { "type": "string", "description": "Category name or key" },
+        "language": { "type": "string", "description": "Video language" },
+        "targetAudience": { "type": "string", "description": "Audience segment" },
+        "targetDuration": { "type": "string", "enum": ["30s", "60s", "90s", "180s"] },
+        "narrationStyle": { "type": "string" },
+        "visualStyle": { "type": "string" },
+        "aspectRatio": { "type": "string", "enum": ["9:16", "16:9", "1:1"] },
+        "researchMode": { "type": "string", "enum": ["combined", "internet", "ai_only"] },
+        "researchDepth": { "type": "string", "enum": ["deep", "standard", "exhaustive"] },
+        "scriptTransformation": { "type": "string" },
+        "publishingWorkflow": { "type": "string" },
+        "status": { "type": "string", "enum": ["draft", "ideation", "research", "scripting", "storyboarding", "rendering", "review", "approved", "published"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerId", "title", "category", "targetDuration", "aspectRatio", "status", "createdAt", "updatedAt"]
+    },
+    "Category": {
+      "title": "Story Category",
+      "description": "Configurable story category definition.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string", "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 500 },
+        "icon": { "type": "string" },
+        "color": { "type": "string" },
+        "enabled": { "type": "boolean" }
+      },
+      "required": ["id", "name", "description", "enabled"]
+    },
+    "ScriptVersion": {
+      "title": "Script Version",
+      "description": "Script revision history and atomic scene breakdowns.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "projectId": { "type": "string" },
+        "versionNumber": { "type": "number" },
+        "title": { "type": "string" },
+        "hook": { "type": "string" },
+        "callToAction": { "type": "string" },
+        "estimatedDuration": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "projectId", "versionNumber", "title", "createdAt"]
+    },
+    "FactualClaim": {
+      "title": "Factual Claim",
+      "description": "Atomic factual statement extracted from scripts for verification.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "projectId": { "type": "string" },
+        "claimText": { "type": "string", "maxLength": 1000 },
+        "associatedScene": { "type": "number" },
+        "status": { "type": "string", "enum": ["Supported", "Partially supported", "Disputed", "Unverified", "Contradicted"] },
+        "confidenceAssessment": { "type": "string", "enum": ["High", "Medium", "Low", "Pending"] },
+        "evidence": { "type": "string" },
+        "reviewerNotes": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "projectId", "claimText", "status"]
+    },
+    "AuditEvent": {
+      "title": "Audit Event",
+      "description": "Immutable log of project events, script updates, approvals, and jobs.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "projectId": { "type": "string" },
+        "userId": { "type": "string" },
+        "action": { "type": "string" },
+        "details": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "action", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "User profiles restricted to owner read/write."
+    },
+    "/projects/{projectId}": {
+      "schema": { "$ref": "#/entities/Project" },
+      "description": "Projects collection owned by users."
+    },
+    "/categories/{categoryId}": {
+      "schema": { "$ref": "#/entities/Category" },
+      "description": "System and custom story categories."
+    },
+    "/projects/{projectId}/scripts/{scriptId}": {
+      "schema": { "$ref": "#/entities/ScriptVersion" },
+      "description": "Script revisions under a project."
+    },
+    "/projects/{projectId}/claims/{claimId}": {
+      "schema": { "$ref": "#/entities/FactualClaim" },
+      "description": "Factual claims and verification records for a project."
+    },
+    "/audit_logs/{eventId}": {
+      "schema": { "$ref": "#/entities/AuditEvent" },
+      "description": "System audit trail."
+    }
+  }
+}

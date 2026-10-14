@@ -1,0 +1,6 @@
+{
+  "name": "AI Video Studio",
+  "description": "Production-oriented AI short-video creation platform with topic discovery, factual verification, script generation, and workflow management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
