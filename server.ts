@@ -8,6 +8,8 @@ import {
   NotFoundError,
   ValidationError,
   FirestoreConfigError,
+  NotImplementedError,
+  ConcurrencyConflictError,
 } from './server/firestoreDb.ts';
 import { generateIdeasAndScript, isGeminiConfigured } from './server/gemini.ts';
 import { requireAuth } from './server/middleware/auth.ts';
@@ -369,6 +371,14 @@ app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
   }
   if (err instanceof ValidationError) {
     res.status(400).json({ error: 'VALIDATION_ERROR', message: err.message });
+    return;
+  }
+  if (err instanceof ConcurrencyConflictError) {
+    res.status(409).json({ error: 'CONFLICT', message: err.message });
+    return;
+  }
+  if (err instanceof NotImplementedError) {
+    res.status(501).json({ error: 'PUBLISHING_NOT_IMPLEMENTED', message: err.message });
     return;
   }
   if (err instanceof FirestoreConfigError) {

@@ -74,6 +74,13 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
   const [newClaimScene, setNewClaimScene] = useState<number>(1);
   const [isAddingClaim, setIsAddingClaim] = useState(false);
 
+  // Claim Verification Form State
+  const [editingVerificationClaimId, setEditingVerificationClaimId] = useState<string | null>(null);
+  const [verifyEvidence, setVerifyEvidence] = useState('');
+  const [verifySource, setVerifySource] = useState('');
+  const [verifyConfidence, setVerifyConfidence] = useState<ConfidenceAssessment>('High');
+  const [verificationError, setVerificationError] = useState<string | null>(null);
+
   // Video Preview Simulation State
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentSceneIdx, setCurrentSceneIdx] = useState(0);
@@ -105,6 +112,7 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
 
       await onUpdateProject(project.id, {
         script: newScript,
+        expectedScriptHash: project.currentScriptHash,
         workflowStages: {
           ...project.workflowStages,
           script: 'ready',
@@ -137,8 +145,43 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
     setIsAddingClaim(false);
   };
 
-  const handleClaimStatusChange = async (claimId: string, status: VerificationStatus) => {
-    await onUpdateClaim(project.id, claimId, { status });
+  const handleClaimStatusChange = async (claim: FactualClaim, newStatus: VerificationStatus) => {
+    if (newStatus === 'Supported') {
+      const hasValidEv = Boolean(claim.evidence && claim.evidence.trim().length >= 10);
+      const hasValidSrc = Boolean(claim.sourceReferences && claim.sourceReferences.length > 0);
+      if (!hasValidEv || !hasValidSrc) {
+        setEditingVerificationClaimId(claim.id);
+        setVerifyEvidence(claim.evidence || '');
+        setVerifySource(claim.sourceReferences?.[0] || '');
+        setVerifyConfidence(claim.confidenceAssessment === 'Pending' ? 'High' : claim.confidenceAssessment);
+        setVerificationError('Evidence and traceable sources must be provided before marking as Supported.');
+        return;
+      }
+    }
+    await onUpdateClaim(project.id, claim.id, { status: newStatus });
+  };
+
+  const handleSaveClaimVerification = async (claimId: string) => {
+    if (!verifyEvidence.trim() || verifyEvidence.trim().length < 10) {
+      setVerificationError('Verifiable evidence description is required (minimum 10 characters).');
+      return;
+    }
+    if (!verifySource.trim() || verifySource.trim().length < 4) {
+      setVerificationError('At least one traceable source citation or URL is required (minimum 4 characters).');
+      return;
+    }
+    try {
+      await onUpdateClaim(project.id, claimId, {
+        status: 'Supported',
+        evidence: verifyEvidence.trim(),
+        sourceReferences: [verifySource.trim()],
+        confidenceAssessment: verifyConfidence,
+      });
+      setEditingVerificationClaimId(null);
+      setVerificationError(null);
+    } catch (err: any) {
+      setVerificationError(err.message || 'Verification update failed.');
+    }
   };
 
   const handleApproveProject = async () => {
@@ -381,20 +424,36 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
                       </span>
                     </div>
 
-                    {/* Quick status selector */}
-                    <div className="flex items-center gap-1.5">
-                      <label className="text-[10px] text-slate-400">Set Status:</label>
+                    {/* Status & Verification controls */}
+                    <div className="flex items-center gap-2">
                       <select
                         value={claim.status}
-                        onChange={(e) => handleClaimStatusChange(claim.id, e.target.value as VerificationStatus)}
+                        onChange={(e) => handleClaimStatusChange(claim, e.target.value as VerificationStatus)}
                         className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-[11px] text-slate-200 focus:outline-none"
                       >
-                        <option value="Supported">Supported</option>
+                        <option value="Unverified">Unverified</option>
                         <option value="Partially supported">Partially supported</option>
                         <option value="Disputed">Disputed</option>
-                        <option value="Unverified">Unverified</option>
                         <option value="Contradicted">Contradicted</option>
+                        <option value="Supported">Supported</option>
                       </select>
+
+                      <button
+                        onClick={() => {
+                          if (editingVerificationClaimId === claim.id) {
+                            setEditingVerificationClaimId(null);
+                          } else {
+                            setEditingVerificationClaimId(claim.id);
+                            setVerifyEvidence(claim.evidence || '');
+                            setVerifySource(claim.sourceReferences?.[0] || '');
+                            setVerifyConfidence(claim.confidenceAssessment === 'Pending' ? 'High' : claim.confidenceAssessment);
+                            setVerificationError(null);
+                          }
+                        }}
+                        className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-semibold transition-colors"
+                      >
+                        {editingVerificationClaimId === claim.id ? 'Cancel' : 'Verify & Cite'}
+                      </button>
                     </div>
                   </div>
 
@@ -402,7 +461,83 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
                     "{claim.claimText}"
                   </p>
 
-                  {claim.evidence && (
+                  {/* Inline Verification Form */}
+                  {editingVerificationClaimId === claim.id && (
+                    <div className="p-3.5 rounded-xl bg-slate-900 border border-indigo-500/40 space-y-3 text-xs">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-indigo-300 uppercase tracking-wider text-[11px]">
+                          Factual Verification & Primary Sources
+                        </span>
+                        <span className="text-[10px] text-slate-400">Phase 1 Gate Requirement</span>
+                      </div>
+
+                      {verificationError && (
+                        <div className="p-2 rounded bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs flex items-center gap-1.5">
+                          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                          <span>{verificationError}</span>
+                        </div>
+                      )}
+
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-semibold text-slate-300">
+                          Supporting Evidence Description (min 10 characters):
+                        </label>
+                        <textarea
+                          value={verifyEvidence}
+                          onChange={(e) => setVerifyEvidence(e.target.value)}
+                          placeholder="e.g., Primary accounts from 1922 expeditions, corroborated by British Museum archival logs..."
+                          rows={2}
+                          className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-white placeholder-slate-600 focus:border-indigo-500 focus:outline-none"
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <label className="text-[11px] font-semibold text-slate-300">
+                            Traceable Source Reference Citation or URL:
+                          </label>
+                          <input
+                            type="text"
+                            value={verifySource}
+                            onChange={(e) => setVerifySource(e.target.value)}
+                            placeholder="e.g., https://archive.org/... or Book title, Vol 2"
+                            className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-white placeholder-slate-600 focus:border-indigo-500 focus:outline-none"
+                          />
+                        </div>
+
+                        <div className="space-y-1">
+                          <label className="text-[11px] font-semibold text-slate-300">
+                            Confidence Assessment:
+                          </label>
+                          <select
+                            value={verifyConfidence}
+                            onChange={(e) => setVerifyConfidence(e.target.value as 'High' | 'Medium')}
+                            className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-white focus:border-indigo-500 focus:outline-none"
+                          >
+                            <option value="High">High Confidence (Primary/Official Archive)</option>
+                            <option value="Medium">Medium Confidence (Reputable Secondary Historiography)</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-end gap-2 pt-1">
+                        <button
+                          onClick={() => setEditingVerificationClaimId(null)}
+                          className="px-3 py-1.5 rounded-lg bg-slate-800 text-slate-300 text-xs font-semibold hover:text-white"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          onClick={() => handleSaveClaimVerification(claim.id)}
+                          className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow transition-all"
+                        >
+                          Confirm & Mark Supported
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {claim.evidence && editingVerificationClaimId !== claim.id && (
                     <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 text-xs space-y-1">
                       <span className="text-slate-400 font-semibold block text-[11px]">
                         Supporting Evidence:
@@ -411,12 +546,12 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
                     </div>
                   )}
 
-                  {claim.sourceReferences && claim.sourceReferences.length > 0 && (
+                  {claim.sourceReferences && claim.sourceReferences.length > 0 && editingVerificationClaimId !== claim.id && (
                     <div className="text-[11px] text-slate-400 flex items-center gap-2">
                       <span className="font-semibold text-slate-400">Sources:</span>
                       <div className="flex flex-wrap gap-1.5">
                         {claim.sourceReferences.map((src, i) => (
-                          <span key={i} className="px-2 py-0.5 rounded bg-slate-900 text-slate-300 border border-slate-800">
+                          <span key={i} className="px-2 py-0.5 rounded bg-slate-900 text-slate-300 border border-slate-800 font-mono text-[10px]">
                             {src}
                           </span>
                         ))}
@@ -909,16 +1044,45 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
             </div>
           )}
 
-          <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-800">
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-4 border-t border-slate-800">
             {project.status !== 'approved' ? (
-              <button
-                onClick={handleApproveProject}
-                disabled={!(project.claims || []).every((c) => c.status === 'Supported') || (project.claims || []).length === 0}
-                className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs shadow-lg shadow-emerald-600/30 transition-all cursor-pointer"
-              >
-                <ShieldCheck className="w-4 h-4" />
-                <span>Approve Video for Publishing</span>
-              </button>
+              <>
+                <div className="text-xs text-slate-400">
+                  {project.status !== 'review' ? (
+                    <span className="text-amber-400 flex items-center gap-1.5">
+                      <AlertTriangle className="w-3.5 h-3.5" />
+                      Project is in '{project.status}' status. Move to 'review' for editorial approval.
+                    </span>
+                  ) : (
+                    <span className="text-emerald-400 flex items-center gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      In Review status. Confirm all claims are Supported before sign-off.
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  {project.status !== 'review' && (
+                    <button
+                      onClick={() => onUpdateProject(project.id, { status: 'review' })}
+                      className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition-all cursor-pointer"
+                    >
+                      Submit for Editorial Review
+                    </button>
+                  )}
+                  <button
+                    onClick={handleApproveProject}
+                    disabled={
+                      project.status !== 'review' ||
+                      !(project.claims || []).every((c) => c.status === 'Supported') ||
+                      (project.claims || []).length === 0
+                    }
+                    className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs shadow-lg shadow-emerald-600/30 transition-all cursor-pointer"
+                  >
+                    <ShieldCheck className="w-4 h-4" />
+                    <span>Approve Video for Publishing</span>
+                  </button>
+                </div>
+              </>
             ) : (
               <div className="flex items-center gap-2 text-emerald-400 text-xs font-bold">
                 <CheckCircle2 className="w-4 h-4" />
@@ -959,6 +1123,20 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
             </span>
           </div>
 
+          {/* Phase 1 Scope & Architecture Disclosure */}
+          <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2 text-xs">
+            <span className="font-bold text-indigo-400 block uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+              <Info className="w-3.5 h-3.5" />
+              Phase 1 Publishing Sandbox Notice
+            </span>
+            <p className="text-slate-300">
+              Official social media distribution integrations (YouTube Shorts, TikTok, Instagram Reels) are scheduled for Phase 2.
+            </p>
+            <p className="text-slate-400 text-[11px]">
+              Dispatch attempts execute strict server-side preflight verification ensuring active approval, current script hashes, and supported claims remain intact while preserving the approved state.
+            </p>
+          </div>
+
           {project.publicationRecord && (
             <div className="p-4 rounded-xl bg-indigo-950/40 border border-indigo-800/60 text-xs text-indigo-200 space-y-1">
               <span className="font-bold text-white block">Official Publication Record:</span>
@@ -982,7 +1160,7 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
                     <button
                       onClick={() => handlePublishProject(plt)}
                       disabled={isPublishing}
-                      className="w-full py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs shadow transition-all"
+                      className="w-full py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs shadow transition-all cursor-pointer"
                     >
                       {isPublishing ? 'Dispatching...' : `Dispatch to ${plt}`}
                     </button>

@@ -133,6 +133,7 @@ export interface Project {
   claims?: FactualClaim[];
   storyboard?: StoryboardScene[];
   currentScriptHash?: string;
+  expectedScriptHash?: string;
   approvalRecord?: ApprovalRecord | null;
   publicationRecord?: PublicationRecord | null;
   createdAt: string;

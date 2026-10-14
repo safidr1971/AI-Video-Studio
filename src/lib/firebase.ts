@@ -78,16 +78,24 @@ export async function getIdToken(): Promise<string> {
 
   // 2. In production, never return or store mock/dev tokens
   if (import.meta.env.PROD || import.meta.env.MODE === 'production') {
+    localStorage.removeItem('ai_studio_auth_token');
     throw new Error('Authentication required: Please sign in with your Firebase account.');
   }
 
   // 3. In non-production, check if developer token bypass is explicitly enabled
+  const isAllowed = isDevTokenAllowed();
   const storedToken = localStorage.getItem('ai_studio_auth_token');
+
   if (storedToken) {
-    return storedToken;
+    const isDev = storedToken.startsWith('dev-token-') || storedToken.startsWith('test-token-');
+    if (isDev && !isAllowed) {
+      localStorage.removeItem('ai_studio_auth_token');
+    } else if (!isDev || isAllowed) {
+      return storedToken;
+    }
   }
 
-  if (isDevTokenAllowed()) {
+  if (isAllowed) {
     const defaultDevToken = 'dev-token-creator-default';
     localStorage.setItem('ai_studio_auth_token', defaultDevToken);
     return defaultDevToken;
@@ -99,14 +107,17 @@ export async function getIdToken(): Promise<string> {
 }
 
 export function setCustomDevToken(token: string) {
-  if (import.meta.env.PROD || import.meta.env.MODE === 'production') {
-    console.warn('Custom dev tokens are disallowed in production mode.');
+  if (import.meta.env.PROD || import.meta.env.MODE === 'production' || !isDevTokenAllowed()) {
+    console.warn('Custom dev tokens are disallowed when dev token mode is disabled or in production.');
     return;
   }
   localStorage.setItem('ai_studio_auth_token', token);
 }
 
 export function getStoredDevToken(): string {
+  if (!isDevTokenAllowed()) {
+    return '';
+  }
   return localStorage.getItem('ai_studio_auth_token') || '';
 }
 

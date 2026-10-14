@@ -15,7 +15,7 @@ import {
   FileText
 } from 'lucide-react';
 import { SystemStatus, api } from '../lib/api';
-import { getStoredDevToken, setCustomDevToken } from '../lib/firebase';
+import { getStoredDevToken, setCustomDevToken, isDevTokenAllowed } from '../lib/firebase';
 
 interface SettingsViewProps {
   systemStatus: SystemStatus | null;
@@ -113,33 +113,35 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
 
         {/* Development User Switcher */}
-        <div className="pt-2 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-3 text-xs">
-          <span className="text-slate-400">
-            Test Ownership Isolation:
-          </span>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => handleSwitchDevUser('creator-alice')}
-              className={`px-2.5 py-1 rounded text-xs font-semibold border ${
-                devUserUid === 'creator-alice'
-                  ? 'bg-indigo-600 text-white border-indigo-500'
-                  : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-white'
-              }`}
-            >
-              User Alice
-            </button>
-            <button
-              onClick={() => handleSwitchDevUser('creator-bob')}
-              className={`px-2.5 py-1 rounded text-xs font-semibold border ${
-                devUserUid === 'creator-bob'
-                  ? 'bg-indigo-600 text-white border-indigo-500'
-                  : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-white'
-              }`}
-            >
-              User Bob
-            </button>
+        {isDevTokenAllowed() && (
+          <div className="pt-2 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-3 text-xs">
+            <span className="text-slate-400">
+              Test Ownership Isolation:
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => handleSwitchDevUser('creator-alice')}
+                className={`px-2.5 py-1 rounded text-xs font-semibold border ${
+                  devUserUid === 'creator-alice'
+                    ? 'bg-indigo-600 text-white border-indigo-500'
+                    : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-white'
+                }`}
+              >
+                User Alice
+              </button>
+              <button
+                onClick={() => handleSwitchDevUser('creator-bob')}
+                className={`px-2.5 py-1 rounded text-xs font-semibold border ${
+                  devUserUid === 'creator-bob'
+                    ? 'bg-indigo-600 text-white border-indigo-500'
+                    : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-white'
+                }`}
+              >
+                User Bob
+              </button>
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       {/* Services Status Cards */}

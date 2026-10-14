@@ -31,9 +31,9 @@ export function computeScriptHash(script?: ScriptData | null): string {
 }
 
 export const LEGAL_TRANSITIONS: Record<ProjectStatus, ProjectStatus[]> = {
-  draft: ['ideation', 'research', 'scripting'],
-  ideation: ['draft', 'research', 'scripting'],
-  research: ['scripting', 'storyboarding'],
+  draft: ['ideation', 'research', 'scripting', 'review'],
+  ideation: ['draft', 'research', 'scripting', 'review'],
+  research: ['scripting', 'storyboarding', 'review'],
   scripting: ['storyboarding', 'review', 'research'],
   storyboarding: ['scripting', 'rendering', 'review'],
   rendering: ['review', 'storyboarding'],

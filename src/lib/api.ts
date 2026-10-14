@@ -152,7 +152,10 @@ export const api = {
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.message || err.error || 'Publication failed');
+      const error: any = new Error(err.message || err.error || 'Publication failed');
+      error.status = res.status;
+      error.code = err.error || (res.status === 501 ? 'PUBLISHING_NOT_IMPLEMENTED' : 'PUBLISH_FAILED');
+      throw error;
     }
     return res.json();
   },

@@ -166,7 +166,11 @@ export default function App() {
       setAuditLogs(newLogs);
       showNotification('success', `Project successfully dispatched to ${platform || 'YouTube Shorts'}!`);
     } catch (err: any) {
-      showNotification('error', err.message || 'Publication failed.');
+      if (err.status === 501 || err.code === 'PUBLISHING_NOT_IMPLEMENTED' || err.message?.includes('501') || err.message?.includes('not yet configured in Phase 1')) {
+        showNotification('info', `Phase 1 Notice: ${platform || 'Social'} publishing adapter is scheduled for Phase 2. The project remains in approved state.`);
+      } else {
+        showNotification('error', err.message || 'Publication check failed.');
+      }
       throw err;
     }
   };

@@ -33,6 +33,81 @@ export class FirestoreConfigError extends Error {
   }
 }
 
+export class NotImplementedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NotImplementedError';
+  }
+}
+
+export class ConcurrencyConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConcurrencyConflictError';
+  }
+}
+
+export function translateFirestoreError(err: any): Error {
+  if (
+    err instanceof ForbiddenError ||
+    err instanceof NotFoundError ||
+    err instanceof ValidationError ||
+    err instanceof NotImplementedError ||
+    err instanceof ConcurrencyConflictError ||
+    err instanceof FirestoreConfigError
+  ) {
+    return err;
+  }
+  const msg = err?.message || '';
+  if (msg.includes('Could not load the default credentials') || err?.code === 7 || err?.code === 'permission-denied') {
+    return new FirestoreConfigError(
+      'Google Cloud Firestore credentials are not configured on this host. Please configure Firebase credentials.'
+    );
+  }
+  if (err?.code === 9 || err?.code === 'failed-precondition') {
+    return new Error(`Firestore Precondition / Composite Index Notice: ${msg}`);
+  }
+  if (err?.code === 14 || err?.code === 'unavailable') {
+    return new Error('Firestore service is temporarily unavailable. Please retry the operation.');
+  }
+  return err;
+}
+
+export function validateClaimEvidence(claim: Partial<FactualClaim>): void {
+  if (claim.status === 'Supported') {
+    if (!claim.evidence || typeof claim.evidence !== 'string' || claim.evidence.trim().length < 10) {
+      throw new ValidationError(
+        'Supported claims require verifiable evidence description (minimum 10 characters).'
+      );
+    }
+    const lowerEv = claim.evidence.trim().toLowerCase();
+    const invalidPlaceholders = ['n/a', 'none', 'todo', 'test', 'placeholder', 'asdf', 'unknown', 'tbd', 'fake'];
+    if (invalidPlaceholders.includes(lowerEv)) {
+      throw new ValidationError(
+        'Placeholder or generic evidence is not acceptable for Supported claims.'
+      );
+    }
+    if (!Array.isArray(claim.sourceReferences) || claim.sourceReferences.length === 0) {
+      throw new ValidationError(
+        'Supported claims require at least one traceable source reference citation or URL.'
+      );
+    }
+    const validSources = claim.sourceReferences.filter(
+      (s) => typeof s === 'string' && s.trim().length >= 4 && !invalidPlaceholders.includes(s.trim().toLowerCase())
+    );
+    if (validSources.length === 0) {
+      throw new ValidationError(
+        'Source references must contain traceable citations or URLs.'
+      );
+    }
+    if (!claim.confidenceAssessment || claim.confidenceAssessment === 'Pending' || claim.confidenceAssessment === 'Low') {
+      throw new ValidationError(
+        'Supported claims must have evaluated confidence assessment (High or Medium).'
+      );
+    }
+  }
+}
+
 const INITIAL_CATEGORIES: StoryCategory[] = [
   {
     id: 'scary-stories',
@@ -156,12 +231,7 @@ export const firestoreDb = {
       });
       return projects.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
     } catch (err: any) {
-      if (err.message?.includes('Could not load the default credentials') || err.code === 7) {
-        throw new FirestoreConfigError(
-          'Google Cloud Firestore credentials are not configured on this host. Please set GOOGLE_APPLICATION_CREDENTIALS or configure Firebase in AI Studio.'
-        );
-      }
-      throw err;
+      throw translateFirestoreError(err);
     }
   },
 
@@ -187,13 +257,7 @@ export const firestoreDb = {
       }
       return data;
     } catch (err: any) {
-      if (err instanceof ForbiddenError) throw err;
-      if (err.message?.includes('Could not load the default credentials') || err.code === 7) {
-        throw new FirestoreConfigError(
-          'Google Cloud Firestore credentials are not configured on this host. Please set GOOGLE_APPLICATION_CREDENTIALS.'
-        );
-      }
-      throw err;
+      throw translateFirestoreError(err);
     }
   },
 
@@ -212,7 +276,21 @@ export const firestoreDb = {
     const id = payload.id || `proj-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const now = new Date().toISOString();
     const scriptHash = payload.script ? computeScriptHash(payload.script) : '';
-    const initialEvidenceStage = recalculateEvidenceStage(payload.claims);
+
+    // SERVER-SIDE INVARIANT: Newly created claims are strictly normalized to Unverified and Pending
+    const normalizedClaims: FactualClaim[] = (payload.claims || []).map((c: any, idx: number) => ({
+      id: c.id || `claim-${Date.now()}-${idx}`,
+      claimText: String(c.claimText || '').trim(),
+      associatedScene: Number(c.associatedScene) || 1,
+      status: 'Unverified' as const,
+      confidenceAssessment: 'Pending' as const,
+      evidence: c.evidence ? String(c.evidence).trim() : undefined,
+      sourceReferences: Array.isArray(c.sourceReferences) ? c.sourceReferences : undefined,
+      reviewerNotes: c.reviewerNotes ? String(c.reviewerNotes) : 'Initial draft claim. Awaiting verification.',
+      updatedAt: now,
+    }));
+
+    const initialEvidenceStage = recalculateEvidenceStage(normalizedClaims);
 
     const newProject: Project = {
       ...payload,
@@ -234,6 +312,7 @@ export const firestoreDb = {
       currentScriptHash: scriptHash,
       approvalRecord: null,
       publicationRecord: null,
+      claims: normalizedClaims,
       createdAt: now,
       updatedAt: now,
     };
@@ -266,12 +345,7 @@ export const firestoreDb = {
       });
       return newProject;
     } catch (err: any) {
-      if (err.message?.includes('Could not load the default credentials') || err.code === 7) {
-        throw new FirestoreConfigError(
-          'Google Cloud Firestore credentials are not configured on this host.'
-        );
-      }
-      throw err;
+      throw translateFirestoreError(err);
     }
   },
 
@@ -280,97 +354,117 @@ export const firestoreDb = {
     rawUpdates: Record<string, any>,
     ownerId: string
   ): Promise<Project> {
-    const existing = await this.getProjectById(id, ownerId);
-    if (!existing) {
-      throw new NotFoundError(`Project ${id} not found.`);
-    }
-
-    // Protect against mass-assignment
-    const { sanitized, attemptedProtectedFields } = sanitizeProjectUpdate(rawUpdates);
-
-    if (rawUpdates.status && rawUpdates.status !== existing.status) {
-      const transition = validateStatusTransition(existing.status, rawUpdates.status);
-      if (!transition.valid) {
-        throw new ValidationError(transition.reason || 'Invalid status transition.');
+    const executeUpdate = (existing: Project): Project => {
+      if (existing.ownerId !== ownerId) {
+        throw new ForbiddenError(`You do not have permission to modify project ${id}.`);
       }
-      sanitized.status = rawUpdates.status;
-    }
 
-    const now = new Date().toISOString();
-    let scriptVersions = existing.scriptVersions || [];
-    let currentScriptHash = existing.currentScriptHash || computeScriptHash(existing.script);
-    let approvalRecord = existing.approvalRecord;
-    let status = sanitized.status || existing.status;
-    let workflowStages = { ...existing.workflowStages };
+      // Concurrency check if expectedScriptHash is provided
+      if (
+        rawUpdates.expectedScriptHash &&
+        existing.currentScriptHash &&
+        rawUpdates.expectedScriptHash !== existing.currentScriptHash
+      ) {
+        throw new ConcurrencyConflictError(
+          'Script was modified by another operation. Please reload and review the latest changes before saving.'
+        );
+      }
 
-    // Check if script content changed
-    if (sanitized.script) {
-      const newHash = computeScriptHash(sanitized.script);
-      sanitized.script.contentHash = newHash;
+      // Protect against mass-assignment
+      const { sanitized } = sanitizeProjectUpdate(rawUpdates);
 
-      if (newHash !== currentScriptHash) {
-        // Record previous script version in history
-        if (existing.script) {
-          scriptVersions = [{ ...existing.script }, ...scriptVersions].slice(0, 50);
+      if (rawUpdates.status && rawUpdates.status !== existing.status) {
+        const transition = validateStatusTransition(existing.status, rawUpdates.status);
+        if (!transition.valid) {
+          throw new ValidationError(transition.reason || 'Invalid status transition.');
         }
-        currentScriptHash = newHash;
+        sanitized.status = rawUpdates.status;
+      }
 
-        // Invalidate approval whenever script content changes!
-        if (existing.status === 'approved' || approvalRecord?.status === 'approved') {
+      const now = new Date().toISOString();
+      let scriptVersions = existing.scriptVersions || [];
+      let currentScriptHash = existing.currentScriptHash || computeScriptHash(existing.script);
+      let approvalRecord = existing.approvalRecord;
+      let status = sanitized.status || existing.status;
+      let workflowStages = { ...existing.workflowStages };
+
+      // Check if script content changed
+      if (sanitized.script) {
+        const newHash = computeScriptHash(sanitized.script);
+        sanitized.script.contentHash = newHash;
+
+        if (newHash !== currentScriptHash) {
+          // Record previous script version in history
+          if (existing.script) {
+            scriptVersions = [{ ...existing.script }, ...scriptVersions].slice(0, 50);
+          }
+          currentScriptHash = newHash;
+
+          // Invalidate approval whenever script content changes!
+          if (existing.status === 'approved' || approvalRecord?.status === 'approved') {
+            approvalRecord = {
+              approvedBy: approvalRecord?.approvedBy || '',
+              approvedAt: approvalRecord?.approvedAt || now,
+              approvedScriptHash: approvalRecord?.approvedScriptHash || '',
+              approvedScriptVersion: approvalRecord?.approvedScriptVersion || 1,
+              status: 'invalidated',
+              notes: 'Approval invalidated automatically: script content was modified.',
+            };
+            status = 'review'; // Demote back to review
+            workflowStages.approval = 'pending';
+          }
+        }
+      }
+
+      // Check if claims changed
+      if (sanitized.claims) {
+        for (const c of sanitized.claims) {
+          validateClaimEvidence(c);
+        }
+        workflowStages.evidence = recalculateEvidenceStage(sanitized.claims);
+        const hasNonSupported = sanitized.claims.some((c) => c.status !== 'Supported');
+        if (hasNonSupported && (existing.status === 'approved' || approvalRecord?.status === 'approved')) {
           approvalRecord = {
             approvedBy: approvalRecord?.approvedBy || '',
             approvedAt: approvalRecord?.approvedAt || now,
             approvedScriptHash: approvalRecord?.approvedScriptHash || '',
             approvedScriptVersion: approvalRecord?.approvedScriptVersion || 1,
             status: 'invalidated',
-            notes: 'Approval invalidated automatically: script content was modified.',
+            notes: 'Approval invalidated automatically: Claims modified with non-supported claim statuses.',
           };
-          status = 'review'; // Demote back to review
+          status = 'review';
           workflowStages.approval = 'pending';
         }
       }
-    }
 
-    // Check if claims changed
-    if (sanitized.claims) {
-      workflowStages.evidence = recalculateEvidenceStage(sanitized.claims);
-      const hasNonSupported = sanitized.claims.some((c) => c.status !== 'Supported');
-      if (hasNonSupported && (existing.status === 'approved' || approvalRecord?.status === 'approved')) {
-        approvalRecord = {
-          approvedBy: approvalRecord?.approvedBy || '',
-          approvedAt: approvalRecord?.approvedAt || now,
-          approvedScriptHash: approvalRecord?.approvedScriptHash || '',
-          approvedScriptVersion: approvalRecord?.approvedScriptVersion || 1,
-          status: 'invalidated',
-          notes: 'Approval invalidated automatically: Claims modified with non-supported claim statuses.',
-        };
-        status = 'review';
-        workflowStages.approval = 'pending';
-      }
-    }
+      const updated: Project = {
+        ...existing,
+        ...sanitized,
+        id: existing.id,
+        ownerId: existing.ownerId, // Immutable
+        status,
+        workflowStages,
+        currentScriptHash,
+        approvalRecord,
+        scriptVersions,
+        updatedAt: now,
+      };
 
-    const updated: Project = {
-      ...existing,
-      ...sanitized,
-      id: existing.id,
-      ownerId: existing.ownerId, // Immutable
-      status,
-      workflowStages,
-      currentScriptHash,
-      approvalRecord,
-      scriptVersions,
-      updatedAt: now,
+      return updated;
     };
 
     if (isUsingMockFirestore()) {
+      const existing = mockStore.projects.get(id);
+      if (!existing) throw new NotFoundError(`Project ${id} not found.`);
+      const updated = executeUpdate(existing);
       mockStore.projects.set(id, updated);
       mockStore.auditLogs.unshift({
         id: `log-${Date.now()}`,
         projectId: id,
         projectTitle: updated.title,
         action: 'Project Updated',
-        details: `Updated project "${updated.title}". Modified fields: ${Object.keys(sanitized).join(', ')}`,
-        timestamp: now,
+        details: `Updated project "${updated.title}". Modified fields: ${Object.keys(rawUpdates).join(', ')}`,
+        timestamp: updated.updatedAt,
         type: 'update',
       });
       return updated;
@@ -378,24 +472,31 @@ export const firestoreDb = {
 
     try {
       const db = getAdminFirestore();
-      await db.collection('projects').doc(id).set(updated);
-      await db.collection('audit_logs').add({
-        projectId: id,
-        projectTitle: updated.title,
-        action: 'Project Updated',
-        details: `Updated project "${updated.title}" by ${ownerId}`,
-        timestamp: now,
-        type: 'update',
-        userId: ownerId,
+      return await db.runTransaction(async (transaction) => {
+        const docRef = db.collection('projects').doc(id);
+        const docSnap = await transaction.get(docRef);
+        if (!docSnap.exists) {
+          throw new NotFoundError(`Project ${id} not found.`);
+        }
+        const existing = docSnap.data() as Project;
+        const updated = executeUpdate(existing);
+        transaction.set(docRef, updated);
+
+        const auditRef = db.collection('audit_logs').doc();
+        transaction.set(auditRef, {
+          projectId: id,
+          projectTitle: updated.title,
+          action: 'Project Updated',
+          details: `Updated project "${updated.title}" by ${ownerId}`,
+          timestamp: updated.updatedAt,
+          type: 'update',
+          userId: ownerId,
+        });
+
+        return updated;
       });
-      return updated;
     } catch (err: any) {
-      if (err.message?.includes('Could not load the default credentials') || err.code === 7) {
-        throw new FirestoreConfigError(
-          'Google Cloud Firestore credentials are not configured on this host.'
-        );
-      }
-      throw err;
+      throw translateFirestoreError(err);
     }
   },
 
@@ -405,76 +506,115 @@ export const firestoreDb = {
     scriptHash: string,
     notes?: string
   ): Promise<Project> {
-    const existing = await this.getProjectById(id, ownerId);
-    if (!existing) throw new NotFoundError(`Project ${id} not found.`);
+    const executeApproval = (existing: Project): Project => {
+      if (existing.ownerId !== ownerId) {
+        throw new ForbiddenError(`You do not have permission to approve project ${id}.`);
+      }
 
-    if (!existing.script) {
-      throw new ValidationError('Cannot approve project without a completed script.');
-    }
+      // STATE MACHINE RULE: Project must be in 'review' state before formal approval
+      if (existing.status !== 'review') {
+        throw new ValidationError(
+          `Cannot approve project: Project must be in 'review' status before formal approval. Current status is '${existing.status}'.`
+        );
+      }
 
-    const currentHash = computeScriptHash(existing.script);
-    if (scriptHash !== currentHash) {
-      throw new ValidationError(
-        'Script hash mismatch: The script was updated since approval was requested. Please refresh and review the latest script.'
-      );
-    }
+      if (!existing.script || !Array.isArray(existing.script.scenes) || existing.script.scenes.length === 0) {
+        throw new ValidationError('Cannot approve project without a valid script containing scenes.');
+      }
 
-    // Verify all claims are supported
-    const claims = existing.claims || [];
-    const hasUnverified = claims.some((c) => c.status !== 'Supported');
-    if (hasUnverified) {
-      throw new ValidationError(
-        'Cannot approve project: All factual claims must have status "Supported" before formal approval.'
-      );
-    }
+      const currentHash = computeScriptHash(existing.script);
+      if (scriptHash !== currentHash) {
+        throw new ValidationError(
+          'Script hash mismatch: The script was updated since approval was requested. Please refresh and review the latest script.'
+        );
+      }
 
-    const now = new Date().toISOString();
-    const approvalRecord = {
-      approvedBy: ownerId,
-      approvedAt: now,
-      approvedScriptHash: currentHash,
-      approvedScriptVersion: existing.script.version,
-      status: 'approved' as const,
-      notes: notes || 'Verified and approved by owner.',
-    };
+      // Verify all factual claims are present, Supported, and have required evidence
+      const claims = existing.claims || [];
+      if (claims.length === 0) {
+        throw new ValidationError(
+          'Cannot approve project without factual claims verification. Extract or add claims in the Evidence tab.'
+        );
+      }
 
-    const updated: Project = {
-      ...existing,
-      status: 'approved',
-      workflowStages: {
-        ...existing.workflowStages,
-        approval: 'approved',
-      },
-      approvalRecord,
-      updatedAt: now,
+      for (const c of claims) {
+        if (c.status !== 'Supported') {
+          throw new ValidationError(
+            `Cannot approve project: Claim "${c.claimText.slice(0, 30)}..." has status "${c.status}". All factual claims must have status "Supported" before formal approval.`
+          );
+        }
+        validateClaimEvidence(c);
+      }
+
+      const now = new Date().toISOString();
+      const approvalRecord = {
+        approvedBy: ownerId,
+        approvedAt: now,
+        approvedScriptHash: currentHash,
+        approvedScriptVersion: existing.script.version,
+        status: 'approved' as const,
+        notes: notes || 'Verified and approved by editorial reviewer.',
+      };
+
+      const updated: Project = {
+        ...existing,
+        status: 'approved',
+        workflowStages: {
+          ...existing.workflowStages,
+          approval: 'approved',
+        },
+        approvalRecord,
+        updatedAt: now,
+      };
+
+      return updated;
     };
 
     if (isUsingMockFirestore()) {
+      const existing = mockStore.projects.get(id);
+      if (!existing) throw new NotFoundError(`Project ${id} not found.`);
+      const updated = executeApproval(existing);
       mockStore.projects.set(id, updated);
       mockStore.auditLogs.unshift({
         id: `log-${Date.now()}`,
         projectId: id,
         projectTitle: updated.title,
         action: 'Project Approved',
-        details: `Project "${updated.title}" formally approved by ${ownerId} (Hash: ${currentHash.slice(0, 8)})`,
-        timestamp: now,
+        details: `Project "${updated.title}" formally approved by ${ownerId} (Hash: ${scriptHash.slice(0, 8)})`,
+        timestamp: updated.updatedAt,
         type: 'approval',
       });
       return updated;
     }
 
-    const db = getAdminFirestore();
-    await db.collection('projects').doc(id).set(updated);
-    await db.collection('audit_logs').add({
-      projectId: id,
-      projectTitle: updated.title,
-      action: 'Project Approved',
-      details: `Project "${updated.title}" formally approved by ${ownerId}`,
-      timestamp: now,
-      type: 'approval',
-      userId: ownerId,
-    });
-    return updated;
+    try {
+      const db = getAdminFirestore();
+      return await db.runTransaction(async (transaction) => {
+        const docRef = db.collection('projects').doc(id);
+        const docSnap = await transaction.get(docRef);
+        if (!docSnap.exists) {
+          throw new NotFoundError(`Project ${id} not found.`);
+        }
+        const existing = docSnap.data() as Project;
+        const updated = executeApproval(existing);
+        transaction.set(docRef, updated);
+
+        const auditRef = db.collection('audit_logs').doc();
+        transaction.set(auditRef, {
+          projectId: id,
+          projectTitle: updated.title,
+          action: 'Project Approved',
+          details: `Project "${updated.title}" formally approved by ${ownerId}`,
+          timestamp: updated.updatedAt,
+          type: 'approval',
+          userId: ownerId,
+        });
+
+        return updated;
+      });
+    } catch (err: any) {
+      throw translateFirestoreError(err);
+    }
   },
 
   async publishProject(
@@ -483,77 +623,67 @@ export const firestoreDb = {
     scriptHash: string,
     platform: string
   ): Promise<Project> {
-    const existing = await this.getProjectById(id, ownerId);
-    if (!existing) throw new NotFoundError(`Project ${id} not found.`);
+    const executePreflightCheck = (existing: Project): void => {
+      if (existing.ownerId !== ownerId) {
+        throw new ForbiddenError(`You do not have permission to publish project ${id}.`);
+      }
 
-    if (existing.status !== 'approved' || !existing.approvalRecord || existing.approvalRecord.status !== 'approved') {
-      throw new ValidationError(
-        'Cannot publish project: Project must have an active approval before publication.'
+      if (existing.status !== 'approved' || !existing.approvalRecord || existing.approvalRecord.status !== 'approved') {
+        throw new ValidationError(
+          'Cannot publish project: Project must have an active approval before publication.'
+        );
+      }
+
+      // Invariant: All factual claims must be Supported before publication
+      const claims = existing.claims || [];
+      const hasNonSupported = claims.some((c) => c.status !== 'Supported');
+      if (hasNonSupported) {
+        throw new ValidationError(
+          'Cannot publish project: All factual claims must have status "Supported" before publication.'
+        );
+      }
+      for (const c of claims) {
+        validateClaimEvidence(c);
+      }
+
+      const currentHash = computeScriptHash(existing.script);
+      if (existing.approvalRecord.approvedScriptHash !== currentHash || scriptHash !== currentHash) {
+        throw new ValidationError(
+          'Cannot publish project: Approved script version does not match current script. Approval has been invalidated.'
+        );
+      }
+
+      // PHASE 1 REALITY GATE:
+      // Social publishing integrations (YouTube Shorts, TikTok, Instagram Reels) are outside Phase 1.
+      // An unconfigured adapter must NOT mark the project published and must NOT create a publication record.
+      // Throw NotImplementedError (maps to 501 PUBLISHING_NOT_IMPLEMENTED).
+      throw new NotImplementedError(
+        `Publishing adapter for platform "${platform || 'YouTube Shorts'}" is not yet configured in Phase 1. Real social media distribution integrations are scheduled for Phase 2. The project remains in approved state.`
       );
-    }
-
-    // Invariant: All factual claims must be Supported before publication
-    const claims = existing.claims || [];
-    const hasNonSupported = claims.some((c) => c.status !== 'Supported');
-    if (hasNonSupported) {
-      throw new ValidationError(
-        'Cannot publish project: All factual claims must have status "Supported" before publication.'
-      );
-    }
-
-    const currentHash = computeScriptHash(existing.script);
-    if (existing.approvalRecord.approvedScriptHash !== currentHash || scriptHash !== currentHash) {
-      throw new ValidationError(
-        'Cannot publish project: Approved script version does not match current script. Approval has been invalidated.'
-      );
-    }
-
-    const now = new Date().toISOString();
-    const publicationRecord = {
-      publishedBy: ownerId,
-      publishedAt: now,
-      approvedScriptHash: currentHash,
-      platform: platform || 'YouTube Shorts',
-      status: 'published' as const,
-    };
-
-    const updated: Project = {
-      ...existing,
-      status: 'published',
-      workflowStages: {
-        ...existing.workflowStages,
-        publishing: 'published',
-      },
-      publicationRecord,
-      updatedAt: now,
     };
 
     if (isUsingMockFirestore()) {
-      mockStore.projects.set(id, updated);
-      mockStore.auditLogs.unshift({
-        id: `log-${Date.now()}`,
-        projectId: id,
-        projectTitle: updated.title,
-        action: 'Project Published',
-        details: `Project "${updated.title}" published to ${platform}`,
-        timestamp: now,
-        type: 'update',
-      });
-      return updated;
+      const existing = mockStore.projects.get(id);
+      if (!existing) throw new NotFoundError(`Project ${id} not found.`);
+      executePreflightCheck(existing);
+      return existing; // unreachable due to throw
     }
 
-    const db = getAdminFirestore();
-    await db.collection('projects').doc(id).set(updated);
-    await db.collection('audit_logs').add({
-      projectId: id,
-      projectTitle: updated.title,
-      action: 'Project Published',
-      details: `Project "${updated.title}" published to ${platform} by ${ownerId}`,
-      timestamp: now,
-      type: 'update',
-      userId: ownerId,
-    });
-    return updated;
+    try {
+      const db = getAdminFirestore();
+      return await db.runTransaction(async (transaction) => {
+        const docRef = db.collection('projects').doc(id);
+        const docSnap = await transaction.get(docRef);
+        if (!docSnap.exists) {
+          throw new NotFoundError(`Project ${id} not found.`);
+        }
+        const existing = docSnap.data() as Project;
+        executePreflightCheck(existing);
+        return existing; // unreachable
+      });
+    } catch (err: any) {
+      throw translateFirestoreError(err);
+    }
   },
 
   async deleteProject(id: string, ownerId: string): Promise<boolean> {
@@ -574,18 +704,22 @@ export const firestoreDb = {
       return true;
     }
 
-    const db = getAdminFirestore();
-    await db.collection('projects').doc(id).delete();
-    await db.collection('audit_logs').add({
-      projectId: id,
-      projectTitle: existing.title,
-      action: 'Project Deleted',
-      details: `Project "${existing.title}" deleted by ${ownerId}`,
-      timestamp: new Date().toISOString(),
-      type: 'delete',
-      userId: ownerId,
-    });
-    return true;
+    try {
+      const db = getAdminFirestore();
+      await db.collection('projects').doc(id).delete();
+      await db.collection('audit_logs').add({
+        projectId: id,
+        projectTitle: existing.title,
+        action: 'Project Deleted',
+        details: `Project "${existing.title}" deleted by ${ownerId}`,
+        timestamp: new Date().toISOString(),
+        type: 'delete',
+        userId: ownerId,
+      });
+      return true;
+    } catch (err: any) {
+      throw translateFirestoreError(err);
+    }
   },
 
   async updateClaim(
@@ -594,11 +728,7 @@ export const firestoreDb = {
     updates: Partial<FactualClaim>,
     ownerId: string
   ): Promise<FactualClaim> {
-    const now = new Date().toISOString();
-
-    if (isUsingMockFirestore()) {
-      const project = mockStore.projects.get(projectId);
-      if (!project) throw new NotFoundError(`Project ${projectId} not found.`);
+    const executeClaimUpdate = (project: Project): FactualClaim => {
       if (project.ownerId !== ownerId) {
         throw new ForbiddenError(`You do not have permission to modify project ${projectId}.`);
       }
@@ -610,14 +740,19 @@ export const firestoreDb = {
       }
 
       const oldClaim = claims[claimIndex];
-      const updatedClaim: FactualClaim = {
+      const mergedClaim: FactualClaim = {
         ...oldClaim,
         ...updates,
         id: oldClaim.id,
-        updatedAt: now,
+        updatedAt: new Date().toISOString(),
       };
-      claims[claimIndex] = updatedClaim;
 
+      // Strict validation for Supported claims
+      if (mergedClaim.status === 'Supported') {
+        validateClaimEvidence(mergedClaim);
+      }
+
+      claims[claimIndex] = mergedClaim;
       project.claims = claims;
       project.workflowStages = {
         ...project.workflowStages,
@@ -633,27 +768,32 @@ export const firestoreDb = {
         project.workflowStages.approval = 'pending';
         project.approvalRecord = {
           approvedBy: project.approvalRecord?.approvedBy || '',
-          approvedAt: project.approvalRecord?.approvedAt || now,
+          approvedAt: project.approvalRecord?.approvedAt || new Date().toISOString(),
           approvedScriptHash: project.approvalRecord?.approvedScriptHash || '',
           approvedScriptVersion: project.approvalRecord?.approvedScriptVersion || 1,
           status: 'invalidated',
-          notes: `Approval invalidated: Claim "${updatedClaim.claimText.slice(0, 30)}..." changed to ${updatedClaim.status}. All claims must remain Supported.`,
+          notes: `Approval invalidated: Claim "${mergedClaim.claimText.slice(0, 30)}..." changed to ${mergedClaim.status}. All claims must remain Supported.`,
         };
       }
 
-      project.updatedAt = now;
-      mockStore.projects.set(projectId, project);
+      project.updatedAt = new Date().toISOString();
+      return mergedClaim;
+    };
 
+    if (isUsingMockFirestore()) {
+      const project = mockStore.projects.get(projectId);
+      if (!project) throw new NotFoundError(`Project ${projectId} not found.`);
+      const updatedClaim = executeClaimUpdate(project);
+      mockStore.projects.set(projectId, project);
       mockStore.auditLogs.unshift({
         id: `log-${Date.now()}`,
         projectId,
         projectTitle: project.title,
         action: 'Claim Updated',
         details: `Claim "${updatedClaim.claimText.slice(0, 40)}" status updated to ${updatedClaim.status} by ${ownerId}`,
-        timestamp: now,
+        timestamp: updatedClaim.updatedAt || new Date().toISOString(),
         type: 'update',
       });
-
       return updatedClaim;
     }
 
@@ -666,46 +806,7 @@ export const firestoreDb = {
           throw new NotFoundError(`Project ${projectId} not found.`);
         }
         const project = docSnap.data() as Project;
-        if (project.ownerId !== ownerId) {
-          throw new ForbiddenError(`You do not have permission to modify project ${projectId}.`);
-        }
-
-        const claims = project.claims || [];
-        const claimIndex = claims.findIndex((c) => c.id === claimId);
-        if (claimIndex === -1) {
-          throw new NotFoundError(`Claim ${claimId} not found in project.`);
-        }
-
-        const oldClaim = claims[claimIndex];
-        const updatedClaim: FactualClaim = {
-          ...oldClaim,
-          ...updates,
-          id: oldClaim.id,
-          updatedAt: now,
-        };
-        claims[claimIndex] = updatedClaim;
-
-        project.claims = claims;
-        project.workflowStages = {
-          ...project.workflowStages,
-          evidence: recalculateEvidenceStage(claims),
-        };
-
-        const hasNonSupported = claims.some((c) => c.status !== 'Supported');
-        if (hasNonSupported && (project.status === 'approved' || project.approvalRecord?.status === 'approved')) {
-          project.status = 'review';
-          project.workflowStages.approval = 'pending';
-          project.approvalRecord = {
-            approvedBy: project.approvalRecord?.approvedBy || '',
-            approvedAt: project.approvalRecord?.approvedAt || now,
-            approvedScriptHash: project.approvalRecord?.approvedScriptHash || '',
-            approvedScriptVersion: project.approvalRecord?.approvedScriptVersion || 1,
-            status: 'invalidated',
-            notes: `Approval invalidated: Claim "${updatedClaim.claimText.slice(0, 30)}..." changed to ${updatedClaim.status}. All claims must remain Supported.`,
-          };
-        }
-
-        project.updatedAt = now;
+        const updatedClaim = executeClaimUpdate(project);
         transaction.set(docRef, project);
 
         const auditRef = db.collection('audit_logs').doc();
@@ -714,7 +815,7 @@ export const firestoreDb = {
           projectTitle: project.title,
           action: 'Claim Updated',
           details: `Claim "${updatedClaim.claimText.slice(0, 40)}" status updated to ${updatedClaim.status} by ${ownerId}`,
-          timestamp: now,
+          timestamp: updatedClaim.updatedAt || new Date().toISOString(),
           type: 'update',
           userId: ownerId,
         });
@@ -722,12 +823,7 @@ export const firestoreDb = {
         return updatedClaim;
       });
     } catch (err: any) {
-      if (err.message?.includes('Could not load the default credentials') || err.code === 7) {
-        throw new FirestoreConfigError(
-          'Google Cloud Firestore credentials are not configured on this host.'
-        );
-      }
-      throw err;
+      throw translateFirestoreError(err);
     }
   },
 
@@ -740,7 +836,6 @@ export const firestoreDb = {
       const db = getAdminFirestore();
       const snapshot = await db.collection('categories').get();
       if (snapshot.empty) {
-        // Initialize default categories in Firestore if empty
         const batch = db.batch();
         for (const cat of INITIAL_CATEGORIES) {
           const docRef = db.collection('categories').doc(cat.id);
@@ -753,11 +848,7 @@ export const firestoreDb = {
       snapshot.forEach((doc: QueryDocumentSnapshot) => list.push(doc.data() as StoryCategory));
       return list;
     } catch (err: any) {
-      if (err.message?.includes('Could not load the default credentials') || err.code === 7) {
-        // Fallback to static category list if Firestore credentials not provided
-        return INITIAL_CATEGORIES;
-      }
-      throw err;
+      return INITIAL_CATEGORIES;
     }
   },
 
@@ -773,9 +864,13 @@ export const firestoreDb = {
       return newCat;
     }
 
-    const db = getAdminFirestore();
-    await db.collection('categories').doc(newCat.id).set(newCat);
-    return newCat;
+    try {
+      const db = getAdminFirestore();
+      await db.collection('categories').doc(newCat.id).set(newCat);
+      return newCat;
+    } catch (err: any) {
+      throw translateFirestoreError(err);
+    }
   },
 
   async toggleCategory(id: string): Promise<StoryCategory | null> {
@@ -786,14 +881,18 @@ export const firestoreDb = {
       return cat;
     }
 
-    const db = getAdminFirestore();
-    const docRef = db.collection('categories').doc(id);
-    const doc = await docRef.get();
-    if (!doc.exists) return null;
-    const cat = doc.data() as StoryCategory;
-    cat.enabled = !cat.enabled;
-    await docRef.update({ enabled: cat.enabled });
-    return cat;
+    try {
+      const db = getAdminFirestore();
+      const docRef = db.collection('categories').doc(id);
+      const doc = await docRef.get();
+      if (!doc.exists) return null;
+      const cat = doc.data() as StoryCategory;
+      cat.enabled = !cat.enabled;
+      await docRef.update({ enabled: cat.enabled });
+      return cat;
+    } catch (err: any) {
+      throw translateFirestoreError(err);
+    }
   },
 
   async getStats(ownerId: string): Promise<ProjectStats> {
