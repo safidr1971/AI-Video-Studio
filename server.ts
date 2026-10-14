@@ -19,6 +19,23 @@ dotenv.config();
 export const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
+// Reverse Proxy & IP Resolution Safety:
+// Blindly trusting arbitrary proxy headers (e.g. app.set('trust proxy', true)) is vulnerable to IP spoofing.
+// Instead, trust proxy is controlled explicitly via TRUST_PROXY env var.
+// When unconfigured, it defaults to false (only trusting the direct TCP socket remote address).
+const trustProxyEnv = process.env.TRUST_PROXY;
+if (trustProxyEnv) {
+  if (trustProxyEnv === 'true') {
+    app.set('trust proxy', 1); // Trust 1 hop (e.g. Google Cloud Run front-end)
+  } else if (!isNaN(Number(trustProxyEnv))) {
+    app.set('trust proxy', Number(trustProxyEnv));
+  } else {
+    app.set('trust proxy', trustProxyEnv);
+  }
+} else {
+  app.set('trust proxy', false);
+}
+
 // Security Headers & Payload Limits
 app.use(securityHeadersMiddleware);
 app.use(express.json({ limit: '1mb' }));

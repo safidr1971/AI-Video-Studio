@@ -1,5 +1,16 @@
 import crypto from 'crypto';
-import { Project, ProjectStatus, ScriptData, ApprovalRecord, PublicationRecord } from '../src/types';
+import { Project, ProjectStatus, ScriptData, ApprovalRecord, PublicationRecord, FactualClaim, WorkflowStages } from '../src/types';
+
+export function recalculateEvidenceStage(claims?: FactualClaim[]): WorkflowStages['evidence'] {
+  if (!claims || claims.length === 0) return 'pending';
+  const hasContradictedOrDisputed = claims.some((c) => c.status === 'Contradicted' || c.status === 'Disputed');
+  if (hasContradictedOrDisputed) return 'in_progress';
+  const allSupported = claims.every((c) => c.status === 'Supported');
+  if (allSupported) return 'verified';
+  const hasSomeSupportedOrPartial = claims.some((c) => c.status === 'Supported' || c.status === 'Partially supported');
+  if (hasSomeSupportedOrPartial) return 'in_progress';
+  return 'unverified';
+}
 
 export function computeScriptHash(script?: ScriptData | null): string {
   if (!script) return '';

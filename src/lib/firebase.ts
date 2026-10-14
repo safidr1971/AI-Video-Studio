@@ -61,29 +61,52 @@ try {
   // Not configured yet
 }
 
+export function isDevTokenAllowed(): boolean {
+  // Never allow in production
+  if (import.meta.env.PROD || import.meta.env.MODE === 'production') {
+    return false;
+  }
+  return import.meta.env.VITE_ALLOW_DEV_TOKEN === 'true';
+}
+
 export async function getIdToken(): Promise<string> {
+  // 1. If real Firebase Auth user is signed in, return their genuine verified ID token
   if (auth?.currentUser) {
     return await auth.currentUser.getIdToken();
   }
 
-  // Fallback dev/test token stored in localStorage for development/testing
+  // 2. In production, never return or store mock/dev tokens
+  if (import.meta.env.PROD || import.meta.env.MODE === 'production') {
+    throw new Error('Authentication required: Please sign in with your Firebase account.');
+  }
+
+  // 3. In non-production, check if developer token bypass is explicitly enabled
   const storedToken = localStorage.getItem('ai_studio_auth_token');
   if (storedToken) {
     return storedToken;
   }
 
-  // Default dev token for seamless initial development before cloud provisioning
-  const defaultDevToken = 'test-token-creator-default';
-  localStorage.setItem('ai_studio_auth_token', defaultDevToken);
-  return defaultDevToken;
+  if (isDevTokenAllowed()) {
+    const defaultDevToken = 'dev-token-creator-default';
+    localStorage.setItem('ai_studio_auth_token', defaultDevToken);
+    return defaultDevToken;
+  }
+
+  throw new Error(
+    'Authentication required: Please sign in with Google or enable VITE_ALLOW_DEV_TOKEN=true for local development.'
+  );
 }
 
 export function setCustomDevToken(token: string) {
+  if (import.meta.env.PROD || import.meta.env.MODE === 'production') {
+    console.warn('Custom dev tokens are disallowed in production mode.');
+    return;
+  }
   localStorage.setItem('ai_studio_auth_token', token);
 }
 
 export function getStoredDevToken(): string {
-  return localStorage.getItem('ai_studio_auth_token') || 'test-token-creator-default';
+  return localStorage.getItem('ai_studio_auth_token') || '';
 }
 
 export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {

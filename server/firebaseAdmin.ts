@@ -84,22 +84,45 @@ export interface VerifiedUser {
   role?: string;
 }
 
+export function isDevTokenAllowed(): boolean {
+  // Never allow in production environment under any circumstance
+  if (process.env.NODE_ENV === 'production') {
+    return false;
+  }
+  // Allow only when explicitly enabled via env var or in unit tests
+  return process.env.ALLOW_DEV_TOKEN === 'true' || process.env.NODE_ENV === 'test';
+}
+
 export async function verifyToken(token: string): Promise<VerifiedUser> {
   if (!token || typeof token !== 'string') {
     throw new Error('Token is missing or not a string');
   }
 
-  // Deterministic test token bypass strictly in test environment
-  if (process.env.NODE_ENV === 'test' && token.startsWith('test-token-')) {
-    const uid = token.replace('test-token-', '');
+  const isDevOrTestToken = token.startsWith('test-token-') || token.startsWith('dev-token-');
+
+  if (isDevOrTestToken) {
+    // 1. Strictly forbid fake tokens in production
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('Development tokens are strictly forbidden in production.');
+    }
+
+    // 2. Default to disabled in development unless explicitly configured
+    if (!isDevTokenAllowed()) {
+      throw new Error(
+        'Development tokens are disabled. Set ALLOW_DEV_TOKEN=true in a non-production environment to enable local developer bypass.'
+      );
+    }
+
+    const uid = token.replace(/^(test-token-|dev-token-)/, '') || 'dev-user';
     return {
       uid,
-      email: `${uid}@studio-test.internal`,
+      email: `${uid}@studio-local.internal`,
       emailVerified: true,
       role: 'creator',
     };
   }
 
+  // Real Firebase ID tokens are always verified via Firebase Admin Auth
   const auth = getAdminAuth();
   const decoded = await auth.verifyIdToken(token);
   return {

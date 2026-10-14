@@ -1,7 +1,7 @@
 import { getAdminFirestore, isFirebaseAdminConfigured } from './firebaseAdmin.ts';
 import type { Query, QueryDocumentSnapshot } from 'firebase-admin/firestore';
 import { Project, StoryCategory, AuditEvent, ProjectStats, FactualClaim, ScriptData, ProjectStatus } from '../src/types';
-import { computeScriptHash, sanitizeProjectUpdate, validateStatusTransition } from './workflow.ts';
+import { computeScriptHash, sanitizeProjectUpdate, validateStatusTransition, recalculateEvidenceStage } from './workflow.ts';
 import fs from 'fs';
 import path from 'path';
 
@@ -205,6 +205,7 @@ export const firestoreDb = {
     const id = payload.id || `proj-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const now = new Date().toISOString();
     const scriptHash = payload.script ? computeScriptHash(payload.script) : '';
+    const initialEvidenceStage = recalculateEvidenceStage(payload.claims);
 
     const newProject: Project = {
       ...payload,
@@ -215,7 +216,7 @@ export const firestoreDb = {
       status: 'draft',
       workflowStages: {
         research: 'pending',
-        evidence: 'pending',
+        evidence: initialEvidenceStage,
         script: payload.script ? 'ready' : 'draft',
         storyboard: 'pending',
         voiceVisuals: 'pending',
@@ -293,6 +294,7 @@ export const firestoreDb = {
     let currentScriptHash = existing.currentScriptHash || computeScriptHash(existing.script);
     let approvalRecord = existing.approvalRecord;
     let status = sanitized.status || existing.status;
+    let workflowStages = { ...existing.workflowStages };
 
     // Check if script content changed
     if (sanitized.script) {
@@ -317,8 +319,26 @@ export const firestoreDb = {
             notes: 'Approval invalidated automatically: script content was modified.',
           };
           status = 'review'; // Demote back to review
-          existing.workflowStages.approval = 'pending';
+          workflowStages.approval = 'pending';
         }
+      }
+    }
+
+    // Check if claims changed
+    if (sanitized.claims) {
+      workflowStages.evidence = recalculateEvidenceStage(sanitized.claims);
+      const hasNonSupported = sanitized.claims.some((c) => c.status !== 'Supported');
+      if (hasNonSupported && (existing.status === 'approved' || approvalRecord?.status === 'approved')) {
+        approvalRecord = {
+          approvedBy: approvalRecord?.approvedBy || '',
+          approvedAt: approvalRecord?.approvedAt || now,
+          approvedScriptHash: approvalRecord?.approvedScriptHash || '',
+          approvedScriptVersion: approvalRecord?.approvedScriptVersion || 1,
+          status: 'invalidated',
+          notes: 'Approval invalidated automatically: Claims modified with non-supported claim statuses.',
+        };
+        status = 'review';
+        workflowStages.approval = 'pending';
       }
     }
 
@@ -328,6 +348,7 @@ export const firestoreDb = {
       id: existing.id,
       ownerId: existing.ownerId, // Immutable
       status,
+      workflowStages,
       currentScriptHash,
       approvalRecord,
       scriptVersions,
@@ -464,6 +485,15 @@ export const firestoreDb = {
       );
     }
 
+    // Invariant: All factual claims must be Supported before publication
+    const claims = existing.claims || [];
+    const hasNonSupported = claims.some((c) => c.status !== 'Supported');
+    if (hasNonSupported) {
+      throw new ValidationError(
+        'Cannot publish project: All factual claims must have status "Supported" before publication.'
+      );
+    }
+
     const currentHash = computeScriptHash(existing.script);
     if (existing.approvalRecord.approvedScriptHash !== currentHash || scriptHash !== currentHash) {
       throw new ValidationError(
@@ -557,30 +587,141 @@ export const firestoreDb = {
     updates: Partial<FactualClaim>,
     ownerId: string
   ): Promise<FactualClaim> {
-    const project = await this.getProjectById(projectId, ownerId);
-    if (!project) throw new NotFoundError(`Project ${projectId} not found.`);
+    const now = new Date().toISOString();
 
-    const claims = project.claims || [];
-    const claim = claims.find((c) => c.id === claimId);
-    if (!claim) throw new NotFoundError(`Claim ${claimId} not found in project.`);
+    if (isUsingMockFirestore()) {
+      const project = mockStore.projects.get(projectId);
+      if (!project) throw new NotFoundError(`Project ${projectId} not found.`);
+      if (project.ownerId !== ownerId) {
+        throw new ForbiddenError(`You do not have permission to modify project ${projectId}.`);
+      }
 
-    Object.assign(claim, updates, { updatedAt: new Date().toISOString() });
+      const claims = project.claims || [];
+      const claimIndex = claims.findIndex((c) => c.id === claimId);
+      if (claimIndex === -1) {
+        throw new NotFoundError(`Claim ${claimId} not found in project.`);
+      }
 
-    // If claim was un-supported and project was approved, invalidate approval
-    if (claim.status !== 'Supported' && project.status === 'approved') {
-      project.status = 'review';
-      project.approvalRecord = {
-        approvedBy: project.approvalRecord?.approvedBy || '',
-        approvedAt: project.approvalRecord?.approvedAt || new Date().toISOString(),
-        approvedScriptHash: project.approvalRecord?.approvedScriptHash || '',
-        approvedScriptVersion: project.approvalRecord?.approvedScriptVersion || 1,
-        status: 'invalidated',
-        notes: `Approval invalidated: Claim "${claim.claimText.slice(0, 30)}..." changed to ${claim.status}.`,
+      const oldClaim = claims[claimIndex];
+      const updatedClaim: FactualClaim = {
+        ...oldClaim,
+        ...updates,
+        id: oldClaim.id,
+        updatedAt: now,
       };
+      claims[claimIndex] = updatedClaim;
+
+      project.claims = claims;
+      project.workflowStages = {
+        ...project.workflowStages,
+        evidence: recalculateEvidenceStage(claims),
+      };
+
+      // SYSTEM-CONTROLLED WORKFLOW INVALIDATION:
+      // If any claim is no longer Supported (e.g. Disputed, Contradicted, Unverified, Partially supported),
+      // invalidate any existing approval, set workflow stage approval to pending, and demote status to review.
+      const hasNonSupported = claims.some((c) => c.status !== 'Supported');
+      if (hasNonSupported && (project.status === 'approved' || project.approvalRecord?.status === 'approved')) {
+        project.status = 'review';
+        project.workflowStages.approval = 'pending';
+        project.approvalRecord = {
+          approvedBy: project.approvalRecord?.approvedBy || '',
+          approvedAt: project.approvalRecord?.approvedAt || now,
+          approvedScriptHash: project.approvalRecord?.approvedScriptHash || '',
+          approvedScriptVersion: project.approvalRecord?.approvedScriptVersion || 1,
+          status: 'invalidated',
+          notes: `Approval invalidated: Claim "${updatedClaim.claimText.slice(0, 30)}..." changed to ${updatedClaim.status}. All claims must remain Supported.`,
+        };
+      }
+
+      project.updatedAt = now;
+      mockStore.projects.set(projectId, project);
+
+      mockStore.auditLogs.unshift({
+        id: `log-${Date.now()}`,
+        projectId,
+        projectTitle: project.title,
+        action: 'Claim Updated',
+        details: `Claim "${updatedClaim.claimText.slice(0, 40)}" status updated to ${updatedClaim.status} by ${ownerId}`,
+        timestamp: now,
+        type: 'update',
+      });
+
+      return updatedClaim;
     }
 
-    await this.updateProject(projectId, { claims }, ownerId);
-    return claim;
+    try {
+      const db = getAdminFirestore();
+      return await db.runTransaction(async (transaction) => {
+        const docRef = db.collection('projects').doc(projectId);
+        const docSnap = await transaction.get(docRef);
+        if (!docSnap.exists) {
+          throw new NotFoundError(`Project ${projectId} not found.`);
+        }
+        const project = docSnap.data() as Project;
+        if (project.ownerId !== ownerId) {
+          throw new ForbiddenError(`You do not have permission to modify project ${projectId}.`);
+        }
+
+        const claims = project.claims || [];
+        const claimIndex = claims.findIndex((c) => c.id === claimId);
+        if (claimIndex === -1) {
+          throw new NotFoundError(`Claim ${claimId} not found in project.`);
+        }
+
+        const oldClaim = claims[claimIndex];
+        const updatedClaim: FactualClaim = {
+          ...oldClaim,
+          ...updates,
+          id: oldClaim.id,
+          updatedAt: now,
+        };
+        claims[claimIndex] = updatedClaim;
+
+        project.claims = claims;
+        project.workflowStages = {
+          ...project.workflowStages,
+          evidence: recalculateEvidenceStage(claims),
+        };
+
+        const hasNonSupported = claims.some((c) => c.status !== 'Supported');
+        if (hasNonSupported && (project.status === 'approved' || project.approvalRecord?.status === 'approved')) {
+          project.status = 'review';
+          project.workflowStages.approval = 'pending';
+          project.approvalRecord = {
+            approvedBy: project.approvalRecord?.approvedBy || '',
+            approvedAt: project.approvalRecord?.approvedAt || now,
+            approvedScriptHash: project.approvalRecord?.approvedScriptHash || '',
+            approvedScriptVersion: project.approvalRecord?.approvedScriptVersion || 1,
+            status: 'invalidated',
+            notes: `Approval invalidated: Claim "${updatedClaim.claimText.slice(0, 30)}..." changed to ${updatedClaim.status}. All claims must remain Supported.`,
+          };
+        }
+
+        project.updatedAt = now;
+        transaction.set(docRef, project);
+
+        const auditRef = db.collection('audit_logs').doc();
+        transaction.set(auditRef, {
+          projectId,
+          projectTitle: project.title,
+          action: 'Claim Updated',
+          details: `Claim "${updatedClaim.claimText.slice(0, 40)}" status updated to ${updatedClaim.status} by ${ownerId}`,
+          timestamp: now,
+          type: 'update',
+          userId: ownerId,
+        });
+
+        return updatedClaim;
+      });
+    } catch (err: any) {
+      if (err.message?.includes('Could not load the default credentials') || err.code === 7) {
+        throw new FirestoreConfigError(
+          'Google Cloud Firestore credentials are not configured on this host.'
+        );
+      }
+      throw err;
+    }
   },
 
   async getCategories(): Promise<StoryCategory[]> {

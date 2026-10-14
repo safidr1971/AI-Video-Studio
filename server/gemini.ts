@@ -25,6 +25,18 @@ export function isGeminiConfigured(): boolean {
   return Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY');
 }
 
+export function coerceFactualClaims(rawClaims: any[]): FactualClaim[] {
+  return (rawClaims || []).map((fc: any, idx: number) => ({
+    id: fc.id || `claim-${Date.now()}-${idx}`,
+    claimText: String(fc.claimText || ''),
+    associatedScene: Number(fc.associatedScene) || 1,
+    status: 'Unverified' as const, // SERVER-SIDE INVARIANT: Strictly forced to Unverified
+    confidenceAssessment: 'Pending' as const, // SERVER-SIDE INVARIANT: Strictly forced to Pending
+    reviewerNotes: fc.reviewerNotes ? String(fc.reviewerNotes) : 'Extracted by AI. Awaiting source verification.',
+    updatedAt: new Date().toISOString(),
+  }));
+}
+
 export function generateTemplateFallback(options: GenerateRequestOptions): GenerateResult {
   const topic = options.topic;
   const targetDuration = options.targetDuration || '60s';
@@ -102,26 +114,26 @@ export function generateTemplateFallback(options: GenerateRequestOptions): Gener
     lastEditedAt: new Date().toISOString(),
   };
 
-  const claims: FactualClaim[] = [
+  const rawFallbackClaims = [
     {
       id: `claim-${Date.now()}-1`,
       claimText: `The documented timeline of ${topic} contains verified historical records and contemporary eyewitness accounts.`,
       associatedScene: 1,
-      status: 'Unverified', // Strictly forced on server
-      confidenceAssessment: 'Pending', // Strictly forced on server
+      status: 'Supported', // Even if model or template claims Supported...
+      confidenceAssessment: 'High', // ...server-side coercion will enforce Unverified and Pending
       reviewerNotes: 'Requires primary source citations and verification check before publication.',
-      updatedAt: new Date().toISOString(),
     },
     {
       id: `claim-${Date.now()}-2`,
       claimText: `Early reports regarding ${topic} contained discrepancies that historians later reconciled.`,
       associatedScene: 2,
-      status: 'Unverified', // Strictly forced on server
-      confidenceAssessment: 'Pending', // Strictly forced on server
+      status: 'Supported',
+      confidenceAssessment: 'High',
       reviewerNotes: 'Cross-check against reputable academic historiography.',
-      updatedAt: new Date().toISOString(),
     },
   ];
+
+  const claims = coerceFactualClaims(rawFallbackClaims);
 
   return {
     ideas,
@@ -332,15 +344,7 @@ Provide:
     };
 
     // SERVER-SIDE INVARIANT: Force every factual claim to Unverified and Pending
-    const claims: FactualClaim[] = (parsed.factualClaims || []).map((fc: any, idx: number) => ({
-      id: fc.id || `claim-${Date.now()}-${idx}`,
-      claimText: String(fc.claimText || ''),
-      associatedScene: Number(fc.associatedScene) || 1,
-      status: 'Unverified' as const, // STRICTLY FORCED on server
-      confidenceAssessment: 'Pending' as const, // STRICTLY FORCED on server
-      reviewerNotes: fc.reviewerNotes ? String(fc.reviewerNotes) : 'Extracted by AI. Awaiting source verification.',
-      updatedAt: new Date().toISOString(),
-    }));
+    const claims = coerceFactualClaims(parsed.factualClaims);
 
     return {
       ideas,

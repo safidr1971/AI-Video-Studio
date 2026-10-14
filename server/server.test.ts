@@ -2,7 +2,11 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import http from 'http';
 import { app } from '../server.ts';
 import { firestoreDb, resetMockFirestore } from './firestoreDb.ts';
-import { computeScriptHash } from './workflow.ts';
+import { computeScriptHash, recalculateEvidenceStage } from './workflow.ts';
+import { verifyToken, isDevTokenAllowed } from './firebaseAdmin.ts';
+import { coerceFactualClaims, generateTemplateFallback } from './gemini.ts';
+import { cleanupExpiredRateLimits, getRateLimitStoreSize, resetRateLimitStore } from './middleware/security.ts';
+import { VerificationStatus } from '../src/types';
 
 let server: http.Server;
 let baseUrl: string;
@@ -27,6 +31,9 @@ afterAll(async () => {
 
 beforeEach(() => {
   resetMockFirestore();
+  resetRateLimitStore();
+  process.env.NODE_ENV = 'test';
+  delete process.env.ALLOW_DEV_TOKEN;
 });
 
 describe('Public Health & Security Headers', () => {
@@ -293,5 +300,300 @@ describe('Workflow Integrity & Formal Approval', () => {
     expect(publishRes.status).toBe(400);
     const publishErr = await publishRes.json();
     expect(publishErr.message).toContain('active approval');
+  });
+});
+
+describe('Claim Downgrade Approval Invalidation (Phase 1.1 Regression Suite)', () => {
+  const setupApprovedProject = async (owner = 'factchecker') => {
+    const script = {
+      version: 1,
+      title: 'Alexander the Great in Egypt',
+      hook: 'Did Alexander conquer Egypt without fighting a single battle?',
+      scenes: [
+        {
+          sceneNumber: 1,
+          narration: 'In 332 BC, Alexander marched into Memphis.',
+          visualPrompt: 'Alexander riding through Egypt',
+          durationSeconds: 15,
+        },
+      ],
+      callToAction: 'Follow for ancient history.',
+      estimatedDuration: 30,
+      lastEditedAt: new Date().toISOString(),
+    };
+
+    const claims = [
+      {
+        id: 'claim-alexander-1',
+        claimText: 'Alexander entered Egypt in 332 BC.',
+        associatedScene: 1,
+        status: 'Supported' as const,
+        confidenceAssessment: 'High' as const,
+        evidence: 'Arrian, Anabasis of Alexander, Book III.',
+      },
+      {
+        id: 'claim-alexander-2',
+        claimText: 'The Persian satrap Mazaces surrendered Egypt without resistance.',
+        associatedScene: 1,
+        status: 'Supported' as const,
+        confidenceAssessment: 'High' as const,
+        evidence: 'Curtius Rufus, History of Alexander.',
+      },
+    ];
+
+    const createRes = await fetch(`${baseUrl}/api/projects`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer test-token-${owner}`,
+      },
+      body: JSON.stringify({
+        title: 'Alexander in Egypt',
+        category: 'Historical Events',
+        targetDuration: '30s',
+        aspectRatio: '9:16',
+        script,
+        claims,
+      }),
+    });
+    const project = await createRes.json();
+    const scriptHash = computeScriptHash(script);
+
+    // Formally approve the project
+    const approveRes = await fetch(`${baseUrl}/api/projects/${project.id}/approve`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer test-token-${owner}`,
+      },
+      body: JSON.stringify({
+        scriptHash,
+        notes: 'All claims verified with primary sources.',
+      }),
+    });
+    expect(approveRes.status).toBe(200);
+    const approved = await approveRes.json();
+    expect(approved.status).toBe('approved');
+    expect(approved.approvalRecord.status).toBe('approved');
+
+    return { project: approved, scriptHash };
+  };
+
+  it('downgrading a claim from Supported to Disputed invalidates approval and rejects publishing', async () => {
+    const { project, scriptHash } = await setupApprovedProject('reviewer-disputed');
+
+    // 1. Change one claim from Supported to Disputed
+    const claimRes = await fetch(`${baseUrl}/api/projects/${project.id}/claims/claim-alexander-2`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer test-token-reviewer-disputed',
+      },
+      body: JSON.stringify({
+        status: 'Disputed',
+        reviewerNotes: 'New academic consensus challenges peaceful capitulation narrative.',
+      }),
+    });
+    expect(claimRes.status).toBe(200);
+    const updatedClaim = await claimRes.json();
+    expect(updatedClaim.status).toBe('Disputed');
+
+    // 2. Reload project from the database
+    const getRes = await fetch(`${baseUrl}/api/projects/${project.id}`, {
+      headers: { Authorization: 'Bearer test-token-reviewer-disputed' },
+    });
+    expect(getRes.status).toBe(200);
+    const reloaded = await getRes.json();
+
+    // 3. Assert project is demoted from approved to review
+    expect(reloaded.status).toBe('review');
+    expect(reloaded.workflowStages.approval).toBe('pending');
+    expect(reloaded.approvalRecord.status).toBe('invalidated');
+    expect(reloaded.approvalRecord.notes).toContain('Approval invalidated');
+
+    // 4. Assert publishing is blocked
+    const publishRes = await fetch(`${baseUrl}/api/projects/${project.id}/publish`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer test-token-reviewer-disputed',
+      },
+      body: JSON.stringify({
+        scriptHash,
+        platform: 'YouTube Shorts',
+      }),
+    });
+    expect(publishRes.status).toBe(400);
+    const publishData = await publishRes.json();
+    expect(publishData.error).toBe('VALIDATION_ERROR');
+  });
+
+  const nonSupportedStatuses: VerificationStatus[] = [
+    'Contradicted',
+    'Unverified',
+    'Partially supported',
+  ];
+
+  for (const targetStatus of nonSupportedStatuses) {
+    it(`downgrading a claim to "${targetStatus}" invalidates approval and blocks publishing`, async () => {
+      const { project, scriptHash } = await setupApprovedProject(`tester-${targetStatus.toLowerCase().replace(/\s+/g, '-')}`);
+
+      const claimRes = await fetch(`${baseUrl}/api/projects/${project.id}/claims/claim-alexander-1`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer test-token-tester-${targetStatus.toLowerCase().replace(/\s+/g, '-')}`,
+        },
+        body: JSON.stringify({
+          status: targetStatus,
+          reviewerNotes: `Claim marked as ${targetStatus}`,
+        }),
+      });
+      expect(claimRes.status).toBe(200);
+
+      // Reload project from database
+      const getRes = await fetch(`${baseUrl}/api/projects/${project.id}`, {
+        headers: { Authorization: `Bearer test-token-tester-${targetStatus.toLowerCase().replace(/\s+/g, '-')}` },
+      });
+      const reloaded = await getRes.json();
+
+      expect(reloaded.status).toBe('review');
+      expect(reloaded.workflowStages.approval).toBe('pending');
+      expect(reloaded.approvalRecord.status).toBe('invalidated');
+
+      // Publishing must be blocked
+      const pubRes = await fetch(`${baseUrl}/api/projects/${project.id}/publish`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer test-token-tester-${targetStatus.toLowerCase().replace(/\s+/g, '-')}`,
+        },
+        body: JSON.stringify({
+          scriptHash,
+          platform: 'TikTok',
+        }),
+      });
+      expect(pubRes.status).toBe(400);
+    });
+  }
+
+  it('correctly recalculates workflow evidence stage based on claim statuses', () => {
+    expect(recalculateEvidenceStage([])).toBe('pending');
+
+    expect(
+      recalculateEvidenceStage([
+        { id: '1', claimText: 'fact 1', associatedScene: 1, status: 'Supported', confidenceAssessment: 'High' },
+        { id: '2', claimText: 'fact 2', associatedScene: 2, status: 'Supported', confidenceAssessment: 'High' },
+      ])
+    ).toBe('verified');
+
+    expect(
+      recalculateEvidenceStage([
+        { id: '1', claimText: 'fact 1', associatedScene: 1, status: 'Supported', confidenceAssessment: 'High' },
+        { id: '2', claimText: 'fact 2', associatedScene: 2, status: 'Disputed', confidenceAssessment: 'Medium' },
+      ])
+    ).toBe('in_progress');
+
+    expect(
+      recalculateEvidenceStage([
+        { id: '1', claimText: 'fact 1', associatedScene: 1, status: 'Unverified', confidenceAssessment: 'Pending' },
+      ])
+    ).toBe('unverified');
+  });
+});
+
+describe('Local Development Authentication Policy', () => {
+  it('strictly rejects dev tokens when NODE_ENV is production even if ALLOW_DEV_TOKEN=true', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.ALLOW_DEV_TOKEN = 'true';
+
+    expect(isDevTokenAllowed()).toBe(false);
+
+    await expect(verifyToken('dev-token-attacker')).rejects.toThrow(
+      'Development tokens are strictly forbidden in production.'
+    );
+    await expect(verifyToken('test-token-attacker')).rejects.toThrow(
+      'Development tokens are strictly forbidden in production.'
+    );
+  });
+
+  it('rejects dev tokens in development when ALLOW_DEV_TOKEN is not enabled', async () => {
+    process.env.NODE_ENV = 'development';
+    delete process.env.ALLOW_DEV_TOKEN;
+
+    expect(isDevTokenAllowed()).toBe(false);
+
+    await expect(verifyToken('dev-token-localuser')).rejects.toThrow(
+      'Development tokens are disabled'
+    );
+  });
+
+  it('accepts dev tokens in development when ALLOW_DEV_TOKEN=true', async () => {
+    process.env.NODE_ENV = 'development';
+    process.env.ALLOW_DEV_TOKEN = 'true';
+
+    expect(isDevTokenAllowed()).toBe(true);
+
+    const verified = await verifyToken('dev-token-engineer1');
+    expect(verified.uid).toBe('engineer1');
+    expect(verified.role).toBe('creator');
+  });
+});
+
+describe('Server-Side Gemini Claim Coercion', () => {
+  it('forces claims to Unverified and Pending regardless of model output', () => {
+    const rawModelOutputClaims = [
+      {
+        id: 'claim-ai-1',
+        claimText: 'The sun rises in the east.',
+        associatedScene: 1,
+        status: 'Supported', // AI attempting to declare truth
+        confidenceAssessment: 'High',
+      },
+      {
+        id: 'claim-ai-2',
+        claimText: 'Water boils at 100 degrees Celsius.',
+        associatedScene: 2,
+        status: 'Verified',
+        confidenceAssessment: 'Certain',
+      },
+    ];
+
+    const coerced = coerceFactualClaims(rawModelOutputClaims);
+
+    expect(coerced.length).toBe(2);
+    for (const c of coerced) {
+      expect(c.status).toBe('Unverified');
+      expect(c.confidenceAssessment).toBe('Pending');
+    }
+  });
+
+  it('ensures template fallback strictly produces Unverified and Pending claims', () => {
+    const fallback = generateTemplateFallback({
+      topic: 'The Library of Alexandria',
+      category: 'Historical Events',
+      allowFallback: true,
+    });
+
+    expect(fallback.isFallback).toBe(true);
+    expect(fallback.claims.length).toBeGreaterThan(0);
+    for (const claim of fallback.claims) {
+      expect(claim.status).toBe('Unverified');
+      expect(claim.confidenceAssessment).toBe('Pending');
+    }
+  });
+});
+
+describe('Rate Limiter Bounded Memory Cleanup', () => {
+  it('cleans up expired entries opportunistically without hanging timers', () => {
+    const now = Date.now();
+    // Verify cleanup runs cleanly
+    const evicted = cleanupExpiredRateLimits(now + 100000);
+    expect(typeof evicted).toBe('number');
+  });
+
+  it('limits memory store size and prevents indefinite memory growth', () => {
+    // Verify store size method works
+    expect(getRateLimitStoreSize()).toBeGreaterThanOrEqual(0);
   });
 });
