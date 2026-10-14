@@ -33,6 +33,8 @@ interface ProjectDetailViewProps {
   project: Project;
   onUpdateProject: (projectId: string, updates: Partial<Project>) => Promise<void>;
   onUpdateClaim: (projectId: string, claimId: string, updates: Partial<FactualClaim>) => Promise<void>;
+  onApproveProject?: (id: string, scriptHash: string, notes?: string) => Promise<void>;
+  onPublishProject?: (id: string, scriptHash: string, platform?: string) => Promise<void>;
   onBack: () => void;
   onOpenAIGenerator: () => void;
 }
@@ -51,6 +53,8 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
   project,
   onUpdateProject,
   onUpdateClaim,
+  onApproveProject,
+  onPublishProject,
   onBack,
   onOpenAIGenerator,
 }) => {
@@ -63,6 +67,7 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
   const [scriptScenes, setScriptScenes] = useState<ScriptScene[]>(project.script?.scenes || []);
   const [scriptCta, setScriptCta] = useState(project.script?.callToAction || '');
   const [isSavingScript, setIsSavingScript] = useState(false);
+  const [isPublishing, setIsPublishing] = useState(false);
 
   // New Claim State
   const [newClaimText, setNewClaimText] = useState('');
@@ -137,13 +142,22 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
   };
 
   const handleApproveProject = async () => {
-    await onUpdateProject(project.id, {
-      status: 'approved',
-      workflowStages: {
-        ...project.workflowStages,
-        approval: 'approved',
-      },
-    });
+    if (onApproveProject) {
+      const hash = project.currentScriptHash || '';
+      await onApproveProject(project.id, hash, 'Formal verification and producer sign-off complete.');
+    }
+  };
+
+  const handlePublishProject = async (platform = 'YouTube Shorts') => {
+    if (onPublishProject) {
+      setIsPublishing(true);
+      try {
+        const hash = project.currentScriptHash || '';
+        await onPublishProject(project.id, hash, platform);
+      } finally {
+        setIsPublishing(false);
+      }
+    }
   };
 
   return (
@@ -873,11 +887,34 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
             ))}
           </div>
 
+          {project.approvalRecord && (
+            <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2 text-xs">
+              <span className="font-bold text-emerald-400 block uppercase tracking-wider text-[11px]">
+                Active Approval Record
+              </span>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-slate-300">
+                <div>
+                  <span className="text-slate-500">Approved By: </span>
+                  <span className="font-mono text-slate-200">{project.approvalRecord.approvedBy}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500">Approved Date: </span>
+                  <span>{new Date(project.approvalRecord.approvedAt).toLocaleString()}</span>
+                </div>
+                <div className="sm:col-span-2">
+                  <span className="text-slate-500">Approved Script Hash: </span>
+                  <span className="font-mono text-indigo-300 text-[11px]">{project.approvalRecord.approvedScriptHash}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-800">
             {project.status !== 'approved' ? (
               <button
                 onClick={handleApproveProject}
-                className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-lg shadow-emerald-600/30 transition-all cursor-pointer"
+                disabled={!(project.claims || []).every((c) => c.status === 'Supported') || (project.claims || []).length === 0}
+                className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs shadow-lg shadow-emerald-600/30 transition-all cursor-pointer"
               >
                 <ShieldCheck className="w-4 h-4" />
                 <span>Approve Video for Publishing</span>
@@ -905,10 +942,30 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
                 Schedule and distribute approved short videos to official accounts.
               </p>
             </div>
-            <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20">
-              API Connectors Scheduled
+            <span
+              className={`text-xs font-semibold px-2.5 py-1 rounded-full ${
+                project.status === 'published'
+                  ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20'
+                  : project.status === 'approved'
+                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                  : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+              }`}
+            >
+              {project.status === 'published'
+                ? 'Published'
+                : project.status === 'approved'
+                ? 'Ready for Dispatch'
+                : 'Approval Required'}
             </span>
           </div>
+
+          {project.publicationRecord && (
+            <div className="p-4 rounded-xl bg-indigo-950/40 border border-indigo-800/60 text-xs text-indigo-200 space-y-1">
+              <span className="font-bold text-white block">Official Publication Record:</span>
+              <p>Platform: {project.publicationRecord.platform} • Dispatched at {new Date(project.publicationRecord.publishedAt).toLocaleString()}</p>
+              <p className="font-mono text-[10px] text-slate-400">Verified Script Hash: {project.publicationRecord.approvedScriptHash}</p>
+            </div>
+          )}
 
           <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 text-xs space-y-3">
             <h3 className="font-bold text-white uppercase tracking-wider text-[11px]">
@@ -916,20 +973,36 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
             </h3>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               {['YouTube Shorts', 'TikTok', 'Instagram Reels'].map((plt) => (
-                <div key={plt} className="p-3 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-between">
-                  <span className="font-semibold text-slate-200">{plt}</span>
-                  <span className="text-[10px] text-slate-500 uppercase">Awaiting OAuth</span>
+                <div key={plt} className="p-3 rounded-lg bg-slate-900 border border-slate-800 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-slate-200">{plt}</span>
+                    <span className="text-[10px] text-slate-500 uppercase">9:16</span>
+                  </div>
+                  {project.status === 'approved' && !project.publicationRecord && (
+                    <button
+                      onClick={() => handlePublishProject(plt)}
+                      disabled={isPublishing}
+                      className="w-full py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs shadow transition-all"
+                    >
+                      {isPublishing ? 'Dispatching...' : `Dispatch to ${plt}`}
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
           </div>
 
-          <div className="p-4 rounded-xl bg-indigo-950/30 border border-indigo-800/40 text-xs text-indigo-200 space-y-1">
-            <span className="font-bold text-white block">Publishing Safety Guard:</span>
-            <p>
-              In accordance with Phase 1 instructions, publishing connectors are not fabricated. Once OAuth credentials for YouTube, TikTok, and Instagram are linked in future phases, videos will be scheduled and dispatched seamlessly.
-            </p>
-          </div>
+          {project.status !== 'approved' && project.status !== 'published' && (
+            <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300 space-y-1">
+              <span className="font-bold text-white block flex items-center gap-1.5">
+                <AlertTriangle className="w-4 h-4 text-amber-400" />
+                Publishing Gatekeeper Guard:
+              </span>
+              <p>
+                This project has not passed formal editorial approval. All claims must be marked "Supported" and verified in the Approval gate before dispatching to social media.
+              </p>
+            </div>
+          )}
         </div>
       )}
     </div>

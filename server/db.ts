@@ -74,6 +74,7 @@ const INITIAL_CATEGORIES: StoryCategory[] = [
 const SEED_PROJECTS: Project[] = [
   {
     id: 'proj-stoic-mindset',
+    ownerId: 'default-owner',
     title: 'Marcus Aurelius and the Plague of Rome',
     description: 'How Rome’s philosopher emperor faced the Antonine Plague with unwavering Stoic calm and sold royal treasures to feed citizens.',
     category: 'Stoic Motivation',
@@ -247,6 +248,7 @@ const SEED_PROJECTS: Project[] = [
   },
   {
     id: 'proj-icarus-myth',
+    ownerId: 'default-owner',
     title: 'The Real Warning of Icarus: The Sun Was Only Half the Story',
     description: 'Daedalus warned his son against flying too high near the sun, but also against flying too low near the sea spray.',
     category: 'Greek Mythology',
@@ -326,6 +328,7 @@ const SEED_PROJECTS: Project[] = [
   },
   {
     id: 'proj-black-forest',
+    ownerId: 'default-owner',
     title: 'The Whispering Pines of the Black Forest',
     description: '18th-century folklore concerning travellers who heard melodic voices calling their exact childhood nicknames from deep between the trees.',
     category: 'Scary Stories',

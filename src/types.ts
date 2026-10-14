@@ -51,7 +51,26 @@ export interface ScriptData {
   scenes: ScriptScene[];
   callToAction: string;
   estimatedDuration: number;
+  contentHash?: string;
   lastEditedAt: string;
+}
+
+export interface ApprovalRecord {
+  approvedBy: string;
+  approvedAt: string;
+  approvedScriptHash: string;
+  approvedScriptVersion: number;
+  status: 'approved' | 'rejected' | 'invalidated';
+  notes?: string;
+}
+
+export interface PublicationRecord {
+  publishedBy: string;
+  publishedAt: string;
+  approvedScriptHash: string;
+  platform: string;
+  targetAccount?: string;
+  status: 'published' | 'scheduled' | 'pending';
 }
 
 export interface StoryIdea {
@@ -91,7 +110,7 @@ export interface WorkflowStages {
 
 export interface Project {
   id: string;
-  ownerId?: string;
+  ownerId: string;
   title: string;
   description: string;
   category: string;
@@ -113,6 +132,9 @@ export interface Project {
   scriptVersions?: ScriptData[];
   claims?: FactualClaim[];
   storyboard?: StoryboardScene[];
+  currentScriptHash?: string;
+  approvalRecord?: ApprovalRecord | null;
+  publicationRecord?: PublicationRecord | null;
   createdAt: string;
   updatedAt: string;
 }

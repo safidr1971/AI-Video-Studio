@@ -1,5 +1,5 @@
 import { initializeApp, getApps, FirebaseApp } from 'firebase/app';
-import { getAuth, Auth, GoogleAuthProvider, signInWithPopup, signOut, User } from 'firebase/auth';
+import { getAuth, Auth, GoogleAuthProvider, signInWithPopup, signOut, User, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, Firestore, doc, getDocFromServer } from 'firebase/firestore';
 
 export enum OperationType {
@@ -33,35 +33,57 @@ export let auth: Auth | null = null;
 export let db: Firestore | null = null;
 export let isFirebaseReady = false;
 
-// Attempt to load firebase config if present
+// Attempt to load firebase config if present using Vite glob pattern so bundler doesn't fail when file is absent
 try {
-  // @ts-ignore - config may not exist until provisioned
-  import('../../firebase-applet-config.json').then((configModule) => {
-    const config = configModule.default;
-    if (config && config.apiKey && config.projectId) {
-      if (!getApps().length) {
-        app = initializeApp(config);
-      } else {
-        app = getApps()[0];
-      }
-      auth = getAuth(app);
-      db = getFirestore(app, config.firestoreDatabaseId);
-      isFirebaseReady = true;
-
-      // Validate connection
-      if (db) {
-        getDocFromServer(doc(db, 'test', 'connection')).catch((err) => {
-          if (err instanceof Error && err.message.includes('the client is offline')) {
-            console.warn('Firebase client is offline or project pending setup.');
-          }
-        });
-      }
+  const configModules = import.meta.glob<{ default: any }>('/firebase-applet-config.json', { eager: true });
+  const configModule = configModules['/firebase-applet-config.json'];
+  const config = configModule?.default || configModule;
+  if (config && config.apiKey && config.projectId) {
+    if (!getApps().length) {
+      app = initializeApp(config);
+    } else {
+      app = getApps()[0];
     }
-  }).catch(() => {
-    // Config not present yet, will use server database
-  });
+    auth = getAuth(app);
+    db = getFirestore(app, config.firestoreDatabaseId);
+    isFirebaseReady = true;
+
+    // Validate connection
+    if (db) {
+      getDocFromServer(doc(db, 'test', 'connection')).catch((err) => {
+        if (err instanceof Error && err.message.includes('the client is offline')) {
+          console.warn('Firebase client is offline or project pending setup.');
+        }
+      });
+    }
+  }
 } catch (e) {
   // Not configured yet
+}
+
+export async function getIdToken(): Promise<string> {
+  if (auth?.currentUser) {
+    return await auth.currentUser.getIdToken();
+  }
+
+  // Fallback dev/test token stored in localStorage for development/testing
+  const storedToken = localStorage.getItem('ai_studio_auth_token');
+  if (storedToken) {
+    return storedToken;
+  }
+
+  // Default dev token for seamless initial development before cloud provisioning
+  const defaultDevToken = 'test-token-creator-default';
+  localStorage.setItem('ai_studio_auth_token', defaultDevToken);
+  return defaultDevToken;
+}
+
+export function setCustomDevToken(token: string) {
+  localStorage.setItem('ai_studio_auth_token', token);
+}
+
+export function getStoredDevToken(): string {
+  return localStorage.getItem('ai_studio_auth_token') || 'test-token-creator-default';
 }
 
 export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
@@ -73,13 +95,13 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
       emailVerified: auth?.currentUser?.emailVerified,
       isAnonymous: auth?.currentUser?.isAnonymous,
       tenantId: auth?.currentUser?.tenantId,
-      providerInfo: auth?.currentUser?.providerData?.map(provider => ({
+      providerInfo: auth?.currentUser?.providerData?.map((provider) => ({
         providerId: provider.providerId,
         email: provider.email,
-      })) || []
+      })) || [],
     },
     operationType,
-    path
+    path,
   };
   console.error('Firestore Error:', JSON.stringify(errInfo));
   throw new Error(JSON.stringify(errInfo));
@@ -98,4 +120,5 @@ export async function logout(): Promise<void> {
   if (auth) {
     await signOut(auth);
   }
+  localStorage.removeItem('ai_studio_auth_token');
 }

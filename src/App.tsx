@@ -141,6 +141,36 @@ export default function App() {
     }
   };
 
+  const handleApproveProject = async (id: string, scriptHash: string, notes?: string) => {
+    try {
+      const updated = await api.approveProject(id, scriptHash, notes);
+      setProjects((prev) => prev.map((p) => (p.id === id ? updated : p)));
+      const newStats = await api.getStats();
+      setStats(newStats);
+      const newLogs = await api.getAuditLogs();
+      setAuditLogs(newLogs);
+      showNotification('success', `Project "${updated.title}" formally approved.`);
+    } catch (err: any) {
+      showNotification('error', err.message || 'Approval failed.');
+      throw err;
+    }
+  };
+
+  const handlePublishProject = async (id: string, scriptHash: string, platform?: string) => {
+    try {
+      const updated = await api.publishProject(id, scriptHash, platform);
+      setProjects((prev) => prev.map((p) => (p.id === id ? updated : p)));
+      const newStats = await api.getStats();
+      setStats(newStats);
+      const newLogs = await api.getAuditLogs();
+      setAuditLogs(newLogs);
+      showNotification('success', `Project successfully dispatched to ${platform || 'YouTube Shorts'}!`);
+    } catch (err: any) {
+      showNotification('error', err.message || 'Publication failed.');
+      throw err;
+    }
+  };
+
   const handleToggleCategory = async (id: string) => {
     try {
       const toggled = await api.toggleCategory(id);
@@ -255,6 +285,8 @@ export default function App() {
               project={selectedProject}
               onUpdateProject={handleUpdateProject}
               onUpdateClaim={handleUpdateClaim}
+              onApproveProject={handleApproveProject}
+              onPublishProject={handlePublishProject}
               onBack={() => setSelectedProjectId(null)}
               onOpenAIGenerator={() => setIsAIGeneratorOpen(true)}
             />

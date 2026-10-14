@@ -17,8 +17,8 @@ export interface GenerateResult {
   recommendedIdeaIndex: number;
   script: ScriptData;
   claims: FactualClaim[];
-  isFallback?: boolean;
-  modelUsed?: string;
+  isFallback: boolean;
+  modelUsed: string;
 }
 
 export function isGeminiConfigured(): boolean {
@@ -27,7 +27,6 @@ export function isGeminiConfigured(): boolean {
 
 export function generateTemplateFallback(options: GenerateRequestOptions): GenerateResult {
   const topic = options.topic;
-  const category = options.category;
   const targetDuration = options.targetDuration || '60s';
 
   const ideas: StoryIdea[] = [
@@ -38,7 +37,7 @@ export function generateTemplateFallback(options: GenerateRequestOptions): Gener
       angle: 'Investigative contradiction and untold turning point',
       synopsis: `An evidence-grounded look into ${topic}, revealing how a single overlooked decision transformed the entire event.`,
       isRecommended: true,
-      whyRecommended: 'Highest emotional stakes and clearest 3-second hook for short-form video retention.'
+      whyRecommended: 'Highest emotional stakes and clearest 3-second hook for short-form video retention.',
     },
     {
       id: `idea-${Date.now()}-2`,
@@ -46,7 +45,7 @@ export function generateTemplateFallback(options: GenerateRequestOptions): Gener
       hook: `On the final night of ${topic}, one survivor wrote a journal entry that was sealed for centuries.`,
       angle: 'Personal eyewitness perspective',
       synopsis: `Focusing on firsthand testimony and personal accounts surrounding ${topic}.`,
-      isRecommended: false
+      isRecommended: false,
     },
     {
       id: `idea-${Date.now()}-3`,
@@ -54,8 +53,8 @@ export function generateTemplateFallback(options: GenerateRequestOptions): Gener
       hook: `Three facts about ${topic} that school history textbooks always skip.`,
       angle: 'Fast-paced countdown',
       synopsis: `Rapid-fire breakdown of the most surprising, verifiable elements of ${topic}.`,
-      isRecommended: false
-    }
+      isRecommended: false,
+    },
   ];
 
   const scenes = [
@@ -65,7 +64,7 @@ export function generateTemplateFallback(options: GenerateRequestOptions): Gener
       visualPrompt: `Dramatic cinematic opening shot of ${topic}, moody atmosphere, 9:16 vertical framing, volumetric light.`,
       durationSeconds: 12,
       transition: 'Impact Zoom',
-      soundCue: 'Low sub-bass boom followed by ticking clock'
+      soundCue: 'Low sub-bass boom followed by ticking clock',
     },
     {
       sceneNumber: 2,
@@ -73,7 +72,7 @@ export function generateTemplateFallback(options: GenerateRequestOptions): Gener
       visualPrompt: `Archival documents and dramatic close-up of historical parchment with candlelight reflection.`,
       durationSeconds: 16,
       transition: 'Fast Whip Cut',
-      soundCue: 'Suspenseful string tremolo'
+      soundCue: 'Suspenseful string tremolo',
     },
     {
       sceneNumber: 3,
@@ -81,7 +80,7 @@ export function generateTemplateFallback(options: GenerateRequestOptions): Gener
       visualPrompt: `High-contrast cinematic revelation, shadows falling across old stone walls or city streets.`,
       durationSeconds: 18,
       transition: 'Cross Dissolve',
-      soundCue: 'Rising choir chord with resonant bell strike'
+      soundCue: 'Rising choir chord with resonant bell strike',
     },
     {
       sceneNumber: 4,
@@ -89,8 +88,8 @@ export function generateTemplateFallback(options: GenerateRequestOptions): Gener
       visualPrompt: `Slow cinematic camera pullback, golden hour backlight, majestic silhouette.`,
       durationSeconds: 14,
       transition: 'Fade to Black',
-      soundCue: 'Lingering orchestral resolution'
-    }
+      soundCue: 'Lingering orchestral resolution',
+    },
   ];
 
   const script: ScriptData = {
@@ -100,7 +99,7 @@ export function generateTemplateFallback(options: GenerateRequestOptions): Gener
     scenes,
     callToAction: 'Which part surprised you the most? Subscribe for more deep-dive historical investigations.',
     estimatedDuration: 60,
-    lastEditedAt: new Date().toISOString()
+    lastEditedAt: new Date().toISOString(),
   };
 
   const claims: FactualClaim[] = [
@@ -108,20 +107,20 @@ export function generateTemplateFallback(options: GenerateRequestOptions): Gener
       id: `claim-${Date.now()}-1`,
       claimText: `The documented timeline of ${topic} contains verified historical records and contemporary eyewitness accounts.`,
       associatedScene: 1,
-      status: 'Unverified',
-      confidenceAssessment: 'Pending',
+      status: 'Unverified', // Strictly forced on server
+      confidenceAssessment: 'Pending', // Strictly forced on server
       reviewerNotes: 'Requires primary source citations and verification check before publication.',
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     },
     {
       id: `claim-${Date.now()}-2`,
       claimText: `Early reports regarding ${topic} contained discrepancies that historians later reconciled.`,
       associatedScene: 2,
-      status: 'Unverified',
-      confidenceAssessment: 'Pending',
+      status: 'Unverified', // Strictly forced on server
+      confidenceAssessment: 'Pending', // Strictly forced on server
       reviewerNotes: 'Cross-check against reputable academic historiography.',
-      updatedAt: new Date().toISOString()
-    }
+      updatedAt: new Date().toISOString(),
+    },
   ];
 
   return {
@@ -130,8 +129,42 @@ export function generateTemplateFallback(options: GenerateRequestOptions): Gener
     script,
     claims,
     isFallback: true,
-    modelUsed: 'Template Studio Engine'
+    modelUsed: 'Template Studio Engine',
   };
+}
+
+async function executeWithRetry<T>(
+  fn: () => Promise<T>,
+  retries = 3,
+  timeoutMs = 35000
+): Promise<T> {
+  let lastError: any;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`Gemini request timed out after ${timeoutMs}ms`)), timeoutMs)
+      );
+      return await Promise.race([fn(), timeoutPromise]);
+    } catch (err: any) {
+      lastError = err;
+      const msg = err.message || '';
+      // Only retry transient errors (rate limit, service unavailable, timeout)
+      const isTransient =
+        msg.includes('429') ||
+        msg.includes('503') ||
+        msg.includes('timed out') ||
+        msg.includes('RESOURCE_EXHAUSTED') ||
+        msg.includes('UNAVAILABLE');
+
+      if (attempt < retries && isTransient) {
+        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 6000);
+        await new Promise((res) => setTimeout(res, delay));
+      } else {
+        break;
+      }
+    }
+  }
+  throw lastError;
 }
 
 export async function generateIdeasAndScript(options: GenerateRequestOptions): Promise<GenerateResult> {
@@ -141,7 +174,7 @@ export async function generateIdeasAndScript(options: GenerateRequestOptions): P
     if (options.allowFallback) {
       return generateTemplateFallback(options);
     }
-    throw new Error('GEMINI_API_KEY is not configured. Please ensure your Gemini API key is set in Settings > Secrets.');
+    throw new Error('GEMINI_API_KEY is not configured on server. Please configure it in Settings > Secrets.');
   }
 
   const ai = new GoogleGenAI({
@@ -183,122 +216,130 @@ Provide:
 4. A list of all factual claims in the script that require verification (marked "Unverified").`;
 
   try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: userPrompt,
-      config: {
-        systemInstruction: systemPrompt,
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            ideas: {
-              type: Type.ARRAY,
-              items: {
+    const response = await executeWithRetry(async () => {
+      return await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: userPrompt,
+        config: {
+          systemInstruction: systemPrompt,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              ideas: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.STRING },
+                    title: { type: Type.STRING },
+                    hook: { type: Type.STRING },
+                    angle: { type: Type.STRING },
+                    synopsis: { type: Type.STRING },
+                    isRecommended: { type: Type.BOOLEAN },
+                    whyRecommended: { type: Type.STRING },
+                  },
+                  required: ['id', 'title', 'hook', 'angle', 'synopsis', 'isRecommended'],
+                },
+              },
+              recommendedIdeaIndex: { type: Type.INTEGER },
+              script: {
                 type: Type.OBJECT,
                 properties: {
-                  id: { type: Type.STRING },
                   title: { type: Type.STRING },
                   hook: { type: Type.STRING },
-                  angle: { type: Type.STRING },
-                  synopsis: { type: Type.STRING },
-                  isRecommended: { type: Type.BOOLEAN },
-                  whyRecommended: { type: Type.STRING }
-                },
-                required: ['id', 'title', 'hook', 'angle', 'synopsis', 'isRecommended']
-              }
-            },
-            recommendedIdeaIndex: { type: Type.INTEGER },
-            script: {
-              type: Type.OBJECT,
-              properties: {
-                title: { type: Type.STRING },
-                hook: { type: Type.STRING },
-                scenes: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      sceneNumber: { type: Type.INTEGER },
-                      narration: { type: Type.STRING },
-                      visualPrompt: { type: Type.STRING },
-                      durationSeconds: { type: Type.INTEGER },
-                      transition: { type: Type.STRING },
-                      soundCue: { type: Type.STRING }
+                  scenes: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        sceneNumber: { type: Type.INTEGER },
+                        narration: { type: Type.STRING },
+                        visualPrompt: { type: Type.STRING },
+                        durationSeconds: { type: Type.INTEGER },
+                        transition: { type: Type.STRING },
+                        soundCue: { type: Type.STRING },
+                      },
+                      required: ['sceneNumber', 'narration', 'visualPrompt', 'durationSeconds'],
                     },
-                    required: ['sceneNumber', 'narration', 'visualPrompt', 'durationSeconds']
-                  }
+                  },
+                  callToAction: { type: Type.STRING },
+                  estimatedDuration: { type: Type.INTEGER },
                 },
-                callToAction: { type: Type.STRING },
-                estimatedDuration: { type: Type.INTEGER }
+                required: ['title', 'hook', 'scenes', 'callToAction', 'estimatedDuration'],
               },
-              required: ['title', 'hook', 'scenes', 'callToAction', 'estimatedDuration']
-            },
-            factualClaims: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  id: { type: Type.STRING },
-                  claimText: { type: Type.STRING },
-                  associatedScene: { type: Type.INTEGER },
-                  status: { type: Type.STRING },
-                  confidenceAssessment: { type: Type.STRING },
-                  reviewerNotes: { type: Type.STRING }
+              factualClaims: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.STRING },
+                    claimText: { type: Type.STRING },
+                    associatedScene: { type: Type.INTEGER },
+                    status: { type: Type.STRING },
+                    confidenceAssessment: { type: Type.STRING },
+                    reviewerNotes: { type: Type.STRING },
+                  },
+                  required: ['id', 'claimText', 'associatedScene', 'status'],
                 },
-                required: ['id', 'claimText', 'associatedScene', 'status']
-              }
-            }
+              },
+            },
+            required: ['ideas', 'recommendedIdeaIndex', 'script', 'factualClaims'],
           },
-          required: ['ideas', 'recommendedIdeaIndex', 'script', 'factualClaims']
-        }
-      }
+        },
+      });
     });
 
     const text = response.text;
     if (!text) {
-      throw new Error('Gemini API returned an empty response.');
+      throw new Error('Gemini API returned an empty text payload.');
     }
 
-    const parsed = JSON.parse(text);
+    let parsed: any;
+    try {
+      parsed = JSON.parse(text);
+    } catch (parseErr) {
+      throw new Error('Failed to parse Gemini JSON output schema.');
+    }
 
-    const ideas: StoryIdea[] = (parsed.ideas || []).map((item: any, idx: number) => ({
+    const ideas: StoryIdea[] = (parsed.ideas || []).slice(0, 3).map((item: any, idx: number) => ({
       id: item.id || `idea-${Date.now()}-${idx}`,
-      title: item.title,
-      hook: item.hook,
-      angle: item.angle,
-      synopsis: item.synopsis,
+      title: String(item.title || `Idea ${idx + 1}`),
+      hook: String(item.hook || ''),
+      angle: String(item.angle || ''),
+      synopsis: String(item.synopsis || ''),
       isRecommended: Boolean(item.isRecommended ?? (idx === parsed.recommendedIdeaIndex)),
-      whyRecommended: item.whyRecommended || (item.isRecommended ? 'Highest engagement potential and clarity' : undefined)
+      whyRecommended: item.whyRecommended ? String(item.whyRecommended) : undefined,
     }));
 
     const scenes = (parsed.script?.scenes || []).map((sc: any, idx: number) => ({
-      sceneNumber: sc.sceneNumber || idx + 1,
-      narration: sc.narration || '',
-      visualPrompt: sc.visualPrompt || '',
+      sceneNumber: Number(sc.sceneNumber) || idx + 1,
+      narration: String(sc.narration || ''),
+      visualPrompt: String(sc.visualPrompt || ''),
       durationSeconds: Number(sc.durationSeconds) || 15,
-      transition: sc.transition || 'Cut',
-      soundCue: sc.soundCue || 'Atmospheric sound design'
+      transition: String(sc.transition || 'Cut'),
+      soundCue: String(sc.soundCue || 'Atmospheric background'),
     }));
 
     const script: ScriptData = {
       version: 1,
-      title: parsed.script?.title || options.topic,
-      hook: parsed.script?.hook || (scenes[0]?.narration ?? ''),
+      title: String(parsed.script?.title || options.topic),
+      hook: String(parsed.script?.hook || (scenes[0]?.narration ?? '')),
       scenes,
-      callToAction: parsed.script?.callToAction || 'Subscribe for more incredible historical revelations.',
-      estimatedDuration: parsed.script?.estimatedDuration || scenes.reduce((acc: number, s: any) => acc + s.durationSeconds, 0),
-      lastEditedAt: new Date().toISOString()
+      callToAction: String(parsed.script?.callToAction || 'Subscribe for more.'),
+      estimatedDuration: Number(parsed.script?.estimatedDuration) || scenes.reduce((acc: number, s: any) => acc + s.durationSeconds, 0),
+      lastEditedAt: new Date().toISOString(),
     };
 
+    // SERVER-SIDE INVARIANT: Force every factual claim to Unverified and Pending
     const claims: FactualClaim[] = (parsed.factualClaims || []).map((fc: any, idx: number) => ({
       id: fc.id || `claim-${Date.now()}-${idx}`,
-      claimText: fc.claimText,
-      associatedScene: fc.associatedScene || 1,
-      status: 'Unverified',
-      confidenceAssessment: 'Pending',
-      reviewerNotes: fc.reviewerNotes || 'Extracted by AI. Awaiting source verification engine.',
-      updatedAt: new Date().toISOString()
+      claimText: String(fc.claimText || ''),
+      associatedScene: Number(fc.associatedScene) || 1,
+      status: 'Unverified' as const, // STRICTLY FORCED on server
+      confidenceAssessment: 'Pending' as const, // STRICTLY FORCED on server
+      reviewerNotes: fc.reviewerNotes ? String(fc.reviewerNotes) : 'Extracted by AI. Awaiting source verification.',
+      updatedAt: new Date().toISOString(),
     }));
 
     return {
@@ -306,19 +347,19 @@ Provide:
       recommendedIdeaIndex: parsed.recommendedIdeaIndex ?? 0,
       script,
       claims,
-      modelUsed: 'gemini-3.8-flash'
+      isFallback: false,
+      modelUsed: 'gemini-3.8-flash',
     };
   } catch (error: any) {
-    console.error('Gemini API execution error:', error);
+    console.error('Gemini API call failed:', error);
     if (options.allowFallback) {
-      const fallback = generateTemplateFallback(options);
-      return fallback;
+      return generateTemplateFallback(options);
     }
-
-    // Format clean error message
     const rawMsg = error.message || String(error);
     if (rawMsg.includes('401') || rawMsg.includes('UNAUTHENTICATED') || rawMsg.includes('service account')) {
-      throw new Error('Gemini API Authorization Notice: The current API key credentials need refreshing or activation in Settings > Secrets. You can also generate using the Studio Script Template mode.');
+      throw new Error(
+        'Gemini API Authorization Notice: The current API key credentials need refreshing or activation in Settings > Secrets. You can also generate using the Studio Script Template mode.'
+      );
     }
     throw error;
   }
